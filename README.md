@@ -52,7 +52,7 @@
 |---|---|---|
 | `encoder_*.axmodel` `decoder_step_*.axmodel` `heads_*.axmodel` | `ABOT_MODELS` + `ABOT_MODEL_SUFFIX`(默认 `_kitti02`) | pulsar2 编译的 AX650N 模型,三个共约 1.4 GB |
 | `host_pose_head/pose_head.safetensors` + `pose_head_config.json` | `ABOT_POSE_WEIGHTS` / `ABOT_POSE_CONFIG`(或 `ABOT_DELIVERY` 交付包根目录) | 主机侧位姿头 |
-| `models/onnx/*.onnx`(可选) | `ABOT_DELIVERY` | 仅 `validate_onnx.py` 用 |
+| `models/onnx/*.onnx` | `ABOT_DELIVERY` | **运行不需要**。只有 `scripts/validate_onnx.py` 用它在 CPU 上跑 ONNX golden,评估 axmodel 的量化误差(需临时 `pip install onnxruntime`) |
 
 Python 依赖见 `requirements.txt`(numpy / cffi / Pillow,服务再加 opencv / matplotlib / viser / fastapi);Axera 运行时和 pyaxengine 来自 SDK,不走 pip。
 缩放内核需要 `gcc`(首次导入时编译到 `abot_axera/_build/`);没有编译器时先找 `abot_axera/prebuilt/` 里的预编译 .so(aarch64 已带),再退回 numpy 实现(权重精确,只差 fp32 累加顺序,~4e-7),`ABOT_RESIZE_NUMPY=1` 可强制。
@@ -206,7 +206,7 @@ python scripts/validate_native.py --runner pyaxengine --dev 7 --dump /tmp/ref.np
 python scripts/validate_native.py --runner native     --dev 7 --dump /tmp/nat.npz
 python scripts/validate_native.py --compare /tmp/ref.npz /tmp/nat.npz     # PASS, 全 0 diff, x3.2
 
-# NPU 链路 vs ONNX golden
+# NPU 链路 vs ONNX golden(可选,评估量化误差;需要 onnxruntime 和交付包里的 models/onnx)
 python scripts/validate_onnx.py testdata/frames12 12
 
 # numpy 主机侧 vs torch/torchvision/open3d 原版(一次性,需要装 torch)
