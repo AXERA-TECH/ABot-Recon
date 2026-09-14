@@ -28,11 +28,18 @@ scripts/                    验证脚本
 
 ## 模型与依赖
 
+模型文件从 HuggingFace 下载:**https://huggingface.co/AXERA-TECH/ABot-Recon**
+
+```bash
+hf download AXERA-TECH/ABot-Recon --local-dir /path/to/ABot-Recon
+```
+
 | 内容 | 环境变量 | 说明 |
 |---|---|---|
-| `encoder_*.axmodel` `decoder_step_*.axmodel` `heads_*.axmodel` | `ABOT_MODELS`、`ABOT_MODEL_SUFFIX`(默认 `_kitti02`) | pulsar2 编译的 AX650N 模型,共约 1.4 GB |
-| `host_pose_head/pose_head.safetensors`、`pose_head_config.json` | `ABOT_POSE_WEIGHTS`、`ABOT_POSE_CONFIG`(或 `ABOT_DELIVERY` 交付包目录) | 主机侧位姿头 |
-| `models/onnx/*.onnx` | `ABOT_DELIVERY` | 运行不需要,仅 `scripts/validate_onnx.py` 评估量化误差时使用 |
+| `encoder_kitti02.axmodel` `decoder_step_kitti02.axmodel` `heads_kitti02.axmodel` | `ABOT_MODELS`(目录)、`ABOT_MODEL_SUFFIX`(默认 `_kitti02`) | pulsar2 编译的 AX650N 模型,共约 1.4 GB |
+| `host_pose_head/pose_head.safetensors`、`host_pose_head/pose_head_config.json` | `ABOT_POSE_WEIGHTS`、`ABOT_POSE_CONFIG` | 主机侧位姿头 |
+
+ONNX 模型运行不需要,仅 `scripts/validate_onnx.py` 评估量化误差时使用。
 
 Python 依赖见 `requirements.txt`:推理只需 numpy、cffi、Pillow;服务另需 opencv、matplotlib、viser、fastapi、uvicorn。Axera 运行时与 pyaxengine 来自 SDK。预处理内核首次导入时自动编译(需 gcc),aarch64 已带预编译库。
 
@@ -55,7 +62,7 @@ tmux new-session -d -s abot "bash start_service.sh > service_run.log 2>&1"   # �
 | `ABOT_DEVICE` | `auto` | `axcl` / `ax650` / `auto` |
 | `ABOT_DEVICE_ID` | `0` | AXCL 卡号(片上忽略) |
 | `ABOT_MODELS` / `ABOT_MODEL_SUFFIX` | `/home/axera/ABot-Recon` / `_kitti02` | axmodel 目录与文件名后缀 |
-| `ABOT_DELIVERY` | 交付包路径 | `host_pose_head/` 所在目录 |
+| `ABOT_POSE_WEIGHTS` / `ABOT_POSE_CONFIG` | `$ABOT_DELIVERY/host_pose_head/...` | 位姿头权重与配置 |
 | `MAP_PORT` / `VISER_PORT` | `8011` / `8082` | 服务端口 |
 | `MAP_DATA` | `./jobs` | 任务产物目录 |
 | `MAP_FPS` | `8` | 默认抽帧率(网页可改,1–15) |
