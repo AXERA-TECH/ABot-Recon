@@ -1,0 +1,12 @@
+jobs/
+testdata/
+*.log
+*.log.*
+abot_axera/_build/
+__pycache__/
+*.pyc
+.git/
+*.axmodel
+*.onnx
+*.safetensors
+*.bak*

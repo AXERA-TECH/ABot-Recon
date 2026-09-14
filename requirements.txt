@@ -8,7 +8,7 @@
 numpy>=1.26              # (2.4.6)
 cffi>=1.16               # (2.1)        pyaxengine C bindings
 pillow>=10               # (11.x)       image IO
-opencv-python>=4.10      # (4.13.0)     frame extraction from video (service only)
+opencv-python-headless>=4.10  # (4.13.0) frame extraction from video (service only)
 matplotlib>=3.9          # (3.11.2)     floorplan / oblique / top-down renders (service only)
 viser>=1.1               # (1.1.0)      web 3D canvas (service only)
 fastapi>=0.110           # (0.136.3)    REST API + dashboard (service only)

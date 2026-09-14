@@ -1,0 +1,62 @@
+name: docker-images
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["README.md", "docs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: docker-latest
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: axcl-x86_64
+            platform: linux/amd64
+            target: axcl
+          - name: axcl-aarch64
+            platform: linux/arm64
+            target: axcl
+          - name: ax650-aarch64
+            platform: linux/arm64
+            target: ax650
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: TARGET=${{ matrix.target }}
+          tags: abot-recon:${{ matrix.name }}
+          outputs: type=docker,dest=/tmp/abot-recon-${{ matrix.name }}.tar
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      - name: Package (tar + tgz)
+        run: |
+          cd /tmp
+          gzip -k -6 abot-recon-${{ matrix.name }}.tar
+          mv abot-recon-${{ matrix.name }}.tar.gz abot-recon-${{ matrix.name }}.tgz
+          sha256sum abot-recon-${{ matrix.name }}.tar abot-recon-${{ matrix.name }}.tgz > abot-recon-${{ matrix.name }}.sha256
+          ls -la abot-recon-${{ matrix.name }}.*
+      - name: Upload to fixed release (overwrite)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --title "Docker images (latest main)" \
+              --notes "Docker images rebuilt from main on every push; assets are overwritten in place. See README for docker run commands." --latest=false
+          gh release upload "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --clobber \
+            /tmp/abot-recon-${{ matrix.name }}.tar /tmp/abot-recon-${{ matrix.name }}.tgz /tmp/abot-recon-${{ matrix.name }}.sha256
+          gh release edit "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --notes "Docker images rebuilt from main (commit ${GITHUB_SHA::8}, $(date -u +%Y-%m-%dT%H:%MZ)); assets are overwritten on every push. See README for docker run commands."

@@ -111,6 +111,40 @@ AXCL 卡 CMM 为 7040 MiB。片上运行需同样约 5.3 GB CMM,板子 CMM 预�
 
 估算:`总时长 ≈ 模型加载 + 抽帧 + N × 3.0 s + 0.13 s × N`,N ≈ 视频秒数 × 抽帧率。例:346 帧(43 s 视频,8 fps)任务 1084 s。`ABOT_RUNNER=pyaxengine` 时每帧约 9.5 s。
 
+## Docker
+
+每次推送 main 后 CI 自动构建三个镜像,放在固定的 release tag [`docker-latest`](https://github.com/AXERA-TECH/ABot-Recon/releases/tag/docker-latest)(每次覆盖),同时提供 `.tar` 和 `.tgz`:
+
+| 文件 | 平台 | 用途 |
+|---|---|---|
+| `abot-recon-axcl-x86_64.tar` / `.tgz` | linux/amd64 | x86 主机 + AXCL 卡 |
+| `abot-recon-axcl-aarch64.tar` / `.tgz` | linux/arm64 | aarch64 主机 + AXCL 卡 |
+| `abot-recon-ax650-aarch64.tar` / `.tgz` | linux/arm64 | AX650 板片上 |
+
+镜像内不含 Axera 运行时,宿主机需已安装 AXCL 驱动(或板子 BSP),运行时从宿主机映射进容器;`/models` 目录按 HuggingFace 仓库原样布局(含 `host_pose_head/`)。
+
+```bash
+# 载入镜像
+docker load -i abot-recon-axcl-x86_64.tgz          # .tar 同样可以
+
+# 模型
+hf download AXERA-TECH/ABot-Recon --local-dir /path/to/ABot-Recon
+
+# AXCL 卡(x86_64 / aarch64 主机)
+docker run -d --name abot -p 8011:8011 -p 8082:8082 \
+  --device /dev/axcl_host --device /dev/ax_mmb_dev --device /dev/msg_userdev \
+  -v /usr/lib/axcl:/usr/lib/axcl:ro -v /usr/bin/axcl:/usr/bin/axcl:ro \
+  -v /path/to/ABot-Recon:/models:ro -v $PWD/jobs:/data/jobs \
+  -e ABOT_DEVICE_ID=0 abot-recon:axcl-x86_64
+
+# AX650 板片上
+docker run -d --name abot -p 8011:8011 -p 8082:8082 --privileged \
+  -v /soc:/soc:ro -v /path/to/ABot-Recon:/models:ro -v $PWD/jobs:/data/jobs \
+  abot-recon:ax650-aarch64
+```
+
+打开 `http://<host>:8011`。环境变量与上文相同(`-e` 传入);容器内默认 `ABOT_MODELS=/models`、`MAP_DATA=/data/jobs`。
+
 ## 验证脚本
 
 ```bash

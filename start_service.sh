@@ -23,6 +23,7 @@ export MAP_EST_LOAD_SEC="${MAP_EST_LOAD_SEC:-25}"     # model-load progress bar 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 PYBIN="${PYBIN:-/home/axera/miniforge3/envs/py312/bin}"
+[ -x "$PYBIN/uvicorn" ] || PYBIN="$(dirname "$(command -v uvicorn)")"   # fall back to whatever is on PATH (docker / other hosts)
 
 cd "$REPO/service"
 exec "$PYBIN/uvicorn" service:app --host 0.0.0.0 --port "$MAP_PORT"
