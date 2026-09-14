@@ -177,21 +177,80 @@ def _safe_name(filename):
     return base
 
 
-def _submit_job(filename, mask_sky, model_name, writer, fps, ceiling_cut=False, ceiling_keep=0.85):
-    """Register + launch a job. `writer(path)` writes the uploaded video to path."""
+# ---- content-addressed video store: one copy per distinct video, jobs hard-link to it ----
+VIDEO_STORE = os.path.join(DATA, "_videos")
+VEXT = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v")
+
+
+def _store_video(src, filename):
+    """Put a video into VIDEO_STORE keyed by sha256. `src` is a readable binary stream or a path.
+    Returns (store_path, sha256, size, existed)."""
+    import hashlib
+    os.makedirs(VIDEO_STORE, exist_ok=True)
+    ext = os.path.splitext(_safe_name(filename))[1].lower() or ".mp4"
+    h = hashlib.sha256(); size = 0
+    if isinstance(src, str):                           # existing file (rerun): hash in place
+        with open(src, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk); size += len(chunk)
+        sha = h.hexdigest(); dst = os.path.join(VIDEO_STORE, sha + ext)
+        if not os.path.exists(dst):
+            try: os.link(src, dst)
+            except OSError: shutil.copyfile(src, dst)
+            return dst, sha, size, False
+        return dst, sha, size, True
+    tmp = os.path.join(VIDEO_STORE, f".upload-{uuid.uuid4().hex}{ext}")
+    with open(tmp, "wb") as f:
+        for chunk in iter(lambda: src.read(1 << 20), b""):
+            h.update(chunk); size += len(chunk); f.write(chunk)
+    sha = h.hexdigest(); dst = os.path.join(VIDEO_STORE, sha + ext)
+    if os.path.exists(dst):
+        os.remove(tmp); return dst, sha, size, True
+    os.replace(tmp, dst); return dst, sha, size, False
+
+
+def _link_video(store_path, vpath):
+    """Expose the stored video inside a job dir without duplicating bytes (hard link > symlink > copy)."""
+    try: os.link(store_path, vpath)
+    except OSError:
+        try: os.symlink(os.path.abspath(store_path), vpath)
+        except OSError: shutil.copyfile(store_path, vpath)
+
+
+def _jobs_with_sha(sha, exclude=None):
+    return [jid for jid, j in _jobs.items() if j.get("sha256") == sha and jid != exclude]
+
+
+def _gc_video_store():
+    """Drop store files no job references any more."""
+    if not os.path.isdir(VIDEO_STORE):
+        return
+    used = {j.get("sha256") for j in _jobs.values() if j.get("sha256")}
+    for f in os.listdir(VIDEO_STORE):
+        sha = os.path.splitext(f)[0]
+        if not f.startswith(".") and sha not in used:
+            try: os.remove(os.path.join(VIDEO_STORE, f))
+            except OSError: pass
+
+
+def _submit_job(filename, mask_sky, model_name, src, fps, ceiling_cut=False, ceiling_keep=0.85):
+    """Register + launch a job. `src` is the uploaded stream or an existing video path."""
     if model_name not in MODELS:
         model_name = mgr.name
     fps = int(fps) if fps and int(fps) > 0 else FPS
     fps = max(1, min(fps, 15))                           # clamp: sane抽帧率范围
     ceiling_cut = bool(ceiling_cut)
     ceiling_keep = max(0.3, min(float(ceiling_keep or 0.85), 1.0))   # clamp fraction
+    store_path, sha, size, existed = _store_video(src, filename)
     job_id = uuid.uuid4().hex[:12]
     out = os.path.join(DATA, job_id); os.makedirs(out, exist_ok=True)
     vpath = os.path.join(out, _safe_name(filename))     # preserve the user's filename
-    writer(vpath)
+    _link_video(store_path, vpath)
+    json.dump({"name": os.path.basename(vpath), "sha256": sha, "size": size},
+              open(os.path.join(out, "video.json"), "w"))
     _jobs[job_id] = {"status": "queued", "out": out, "t": time.time(),
                      "video": os.path.basename(vpath), "vpath": vpath, "mask_sky": mask_sky,
-                     "model": model_name, "fps": fps,
+                     "model": model_name, "fps": fps, "sha256": sha, "video_size": size,
                      "ceiling_cut": ceiling_cut, "ceiling_keep": ceiling_keep}
     threading.Thread(target=_worker,
                      args=(job_id, vpath, mask_sky, model_name, fps, ceiling_cut, ceiling_keep),
@@ -206,17 +265,17 @@ async def submit(file: UploadFile = File(...), mask_sky: bool = Form(False),
     model_name = model or mgr.name
     if model_name not in MODELS:
         raise HTTPException(400, f"unknown model {model_name}")
-    def _w(p):
-        with open(p, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-    job_id = _submit_job(file.filename, mask_sky, model_name, _w, fps, ceiling_cut, ceiling_keep)
-    return {"job_id": job_id, "model": model_name}
+    job_id = _submit_job(file.filename, mask_sky, model_name, file.file, fps, ceiling_cut, ceiling_keep)
+    same = _jobs_with_sha(_jobs[job_id]["sha256"], exclude=job_id)
+    return {"job_id": job_id, "model": model_name, "dedup": bool(same), "same_as": same}
 
 
 def _public(j):
     """Job dict for the API: drop server paths; attach live progress/ETA to the running job
     (single job at a time, so the process-wide progress slot belongs to it)."""
     out = {k: v for k, v in j.items() if k not in ("out", "vpath")}
+    if j.get("sha256"):
+        out["same_as"] = [x for x in _jobs_with_sha(j["sha256"]) if _jobs[x] is not j]
     if out.get("status") == "running":
         try:
             from abot_axera import progress as _prog
@@ -264,14 +323,13 @@ def rerun(job_id: str):
     j = _jobs[job_id]; out = j.get("out", os.path.join(DATA, job_id))
     src = j.get("vpath")
     if not src or not os.path.exists(src):        # fallback: find the source VIDEO file in the dir
-        vext = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v")   # a FILE (skip input_frames/ dir)
         cand = [f for f in os.listdir(out)
-                if os.path.isfile(os.path.join(out, f)) and f.lower().endswith(vext)] if os.path.isdir(out) else []
+                if os.path.isfile(os.path.join(out, f)) and f.lower().endswith(VEXT)] if os.path.isdir(out) else []
         if not cand:
             raise HTTPException(400, "input video not found")
         src = os.path.join(out, cand[0])
     new_id = _submit_job(j.get("video") or os.path.basename(src), j.get("mask_sky", False),
-                         j.get("model") or mgr.name, lambda p: shutil.copyfile(src, p),
+                         j.get("model") or mgr.name, src,
                          j.get("fps") or FPS,
                          j.get("ceiling_cut", False), j.get("ceiling_keep", 0.85))
     return {"job_id": new_id}
@@ -284,6 +342,7 @@ def delete_job(job_id: str):
     out = _jobs.pop(job_id).get("out")
     if out and os.path.isdir(out):
         shutil.rmtree(out, ignore_errors=True)
+    _gc_video_store()
     return {"deleted": job_id}
 
 
@@ -456,15 +515,19 @@ def _startup():
     newest = None
     for jid in sorted(os.listdir(DATA)) if os.path.isdir(DATA) else []:
         d = os.path.join(DATA, jid)
-        if not os.path.isdir(d):
+        if not os.path.isdir(d) or jid.startswith("_"):     # _videos/ is the content store, not a job
             continue
         has_cloud = os.path.exists(os.path.join(d, "cloud.ply"))
         _jobs[jid] = {"status": "done" if has_cloud else "unknown", "out": d,
                       "t": os.path.getmtime(d), "products": sorted(os.listdir(d))}
-        vext = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v")   # locate source video (for rerun)
-        vids = [f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) and f.lower().endswith(vext)]
+        vids = [f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) and f.lower().endswith(VEXT)]
         if vids:
             _jobs[jid]["vpath"] = os.path.join(d, vids[0]); _jobs[jid]["video"] = vids[0]
+        vj = os.path.join(d, "video.json")
+        if os.path.exists(vj):
+            try:
+                v = json.load(open(vj)); _jobs[jid]["sha256"] = v.get("sha256"); _jobs[jid]["video_size"] = v.get("size")
+            except Exception: pass
         mp = os.path.join(d, "meta.json")
         if os.path.exists(mp):
             try:

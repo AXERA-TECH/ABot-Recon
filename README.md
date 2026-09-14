@@ -53,6 +53,7 @@ tmux new-session -d -s abot "bash start_service.sh > service_run.log 2>&1"   # �
 - 网页与 API:`http://<host>:8011`;viser 3D:`:8082`(内嵌在网页中)
 - 网页流程:上传视频 → 选抽帧率 → 提交 → 进度条(帧 i/N、已用、预计剩余)→ 3D 查看 / 俯视图 / 下载 ply
 - 模型在首次任务时加载,空闲 `MAP_IDLE_UNLOAD` 秒后卸载
+- 任务卡片可直接播放原视频;同一视频只在 `jobs/_videos/` 存一份(按内容哈希),任务目录硬链接到它,删除任务后无引用的视频自动清除
 
 ### 环境变量
 
@@ -71,8 +72,8 @@ tmux new-session -d -s abot "bash start_service.sh > service_run.log 2>&1"   # �
 ### API
 
 ```
-POST /jobs                file[, fps, ceiling_cut, ceiling_keep]  → {job_id}
-GET  /jobs                任务列表;运行中的带 progress {phase, frame, total, elapsed_s, sec_per_frame, eta_s}
+POST /jobs                file[, fps, ceiling_cut, ceiling_keep]  → {job_id, dedup, same_as}
+GET  /jobs                任务列表;运行中的带 progress {phase, frame, total, elapsed_s, sec_per_frame, eta_s};same_as = 用同一视频的其他任务
 GET  /jobs/{id}           任务状态、meta、产物
 GET  /jobs/{id}/{file}    下载产物(floorplan.png / cloud.ply / recon.npz / view_*.png)
 POST /jobs/{id}/view      载入 viser;POST /jobs/{id}/rerun 重跑;DELETE /jobs/{id} 删除

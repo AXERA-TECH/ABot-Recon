@@ -71,6 +71,9 @@
   .job .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px}
   .job .acts a,.job .acts button{font-size:12px;padding:5px 9px;border-radius:8px}
   .job .acts button.danger:hover{border-color:var(--bad);color:var(--bad)}
+  .job .player{margin-top:10px}
+  .job .player video{width:100%;max-height:260px;background:#000;border-radius:8px;display:block}
+  .job .player .nv{color:var(--muted);font-size:12px}
   .view{position:relative;background:#000;border:1px solid var(--line);border-radius:var(--radius);
     overflow:hidden;min-height:460px;flex:1;display:flex}
   .view iframe{border:0;width:100%;height:100%;min-height:460px;background:#000}
@@ -227,6 +230,7 @@ function fmtJob(id,j){
     for(const f of ["cloud.ply","mesh.ply","place_map.nvclip"])
       if(P.includes(f))acts.push(`<a href="/jobs/${id}/${f}" download>${f}</a>`);
   }
+  if(j.video)acts.push(`<button class="ghost" onclick="toggleVideo('${id}')">${openPlayers.has(id)?"收起视频":"视频"}</button>`);
   if(st==="done"||st==="error")acts.push(`<button class="ghost" onclick="rerun('${id}')">重跑</button>`);
   acts.push(`<button class="ghost danger" onclick="delJob('${id}')">删除</button>`);
   let info, extra="";
@@ -254,19 +258,46 @@ function fmtJob(id,j){
       extra=`<div class="bar" style="margin-top:6px"><i style="width:100%;opacity:.35"></i></div>`;
     }
   }
-  return `<div class="job"><div class="top">
+  const same=(j.same_as||[]).map(x=>x.slice(0,8)).join(", ");
+  const dedup=same?` · <span title="同一视频只存一份,任务目录硬链接到共享存储">同视频: ${same}</span>`:"";
+  const size=j.video_size?` · ${(j.video_size/1048576).toFixed(1)} MB`:"";
+  return `<div class="top">
       <span class="name mono">${(j.video||id)}</span>
       <span class="chip ${st}">${LABEL2(st)}</span></div>
-      <div class="info">${info} · <span class="mono">${id.slice(0,8)}</span> · ${j.model||""}</div>
+      <div class="info">${info} · <span class="mono">${id.slice(0,8)}</span> · ${j.model||""}${size}${dedup}</div>
       ${extra}
-      ${acts.length?`<div class="acts">${acts.join("")}</div>`:""}</div>`;
+      ${acts.length?`<div class="acts">${acts.join("")}</div>`:""}`;
+}
+const openPlayers=new Set();
+function toggleVideo(id){
+  const pl=document.querySelector(`#job-${id} .player`);if(!pl)return;
+  if(openPlayers.has(id)){openPlayers.delete(id);pl.innerHTML="";}
+  else{openPlayers.add(id);const j=lastJobs[id]||{};
+    pl.innerHTML=`<video controls preload="metadata" src="/jobs/${id}/${encodeURIComponent(j.video||"")}"></video>
+      <div class="nv">浏览器不支持该编码时可 <a href="/jobs/${id}/${encodeURIComponent(j.video||"")}" download>下载视频</a>(HEVC 的 .mov 通常仅 Safari 可播)</div>`;}
+  pollJobs();
 }
 function fmtDur(sec){sec=Math.max(0,Math.round(sec));const m=Math.floor(sec/60),s=sec%60;return m?`${m}分${String(s).padStart(2,"0")}秒`:`${s}秒`;}
 const LABEL2=s=>({queued:"排队",running:"处理中",done:"完成",error:"失败",unknown:"—"}[s]||s);
+let lastJobs={};
 async function pollJobs(){
-  try{const d=await jget("/jobs");
+  try{const d=await jget("/jobs");lastJobs=d;
     const ids=Object.keys(d).sort((a,b)=>(d[b].t||0)-(d[a].t||0));
-    $("#jobs").innerHTML=ids.length?ids.map(id=>fmtJob(id,d[id])).join(""):`<div class="job info">暂无任务</div>`;
+    const box=$("#jobs");
+    if(!ids.length){box.innerHTML=`<div class="job info">暂无任务</div>`;return;}
+    if(box.querySelector(".job.info"))box.innerHTML="";
+    const seen=new Set();let prev=null;
+    for(const id of ids){seen.add(id);
+      let el=document.getElementById("job-"+id);
+      if(!el){el=document.createElement("div");el.className="job";el.id="job-"+id;
+        el.innerHTML=`<div class="card-body"></div><div class="player"></div>`;}
+      const html=fmtJob(id,d[id]);const body=el.firstElementChild;
+      if(body.dataset.h!==html){body.innerHTML=html;body.dataset.h=html;}
+      // keep DOM order == sort order without re-creating nodes (open video players survive)
+      const want=prev?prev.nextElementSibling:box.firstElementChild;
+      if(want!==el)box.insertBefore(el,want);
+      prev=el;}
+    for(const el of [...box.children])if(!seen.has(el.id.slice(4))){el.remove();openPlayers.delete(el.id.slice(4));}
   }catch(e){}
 }
 async function view3d(id){await jpost(`/jobs/${id}/view`);
@@ -304,7 +335,7 @@ $("#btnSubmit").onclick=async()=>{
     const r=await fetch("/jobs",{method:"POST",body:fd});
     if(!r.ok)throw new Error("HTTP "+r.status);
     const d=await r.json();
-    toast("已提交,开始建图:"+(d.job_id||"").slice(0,8));
+    toast((d.dedup?"视频已存在,复用存储。":"")+"已提交,开始建图:"+(d.job_id||"").slice(0,8));
     picked=null;file.value="";$("#dropHint").textContent="支持 mp4 / mov …";
     pollJobs();
   }catch(e){toast("提交失败:"+((e&&e.message)?e.message:e));$("#btnSubmit").disabled=false;}
