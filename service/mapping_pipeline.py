@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""ABot-Recon 建图流水线 — 一个视频 → 点云 + 户型俯视图 + 3D 视图。
+
+推理核心是 ABot-Recon(acvlab/ABot-Recon):流式前馈重建,直接输出 c2w 位姿 + 世界坐标点图 +
+置信度。ABOT_BACKEND=axera 时 encoder/decoder/heads 跑在 Axera NPU 上(abot_axera 包),
+否则走上游 torch 路径(需要 GPU)。
+
+产物(写入 out_dir):
+  recon.npz     对齐后的相机中心 cams[N,3] + 原始 poses[N,4,4](网页轨迹用)
+  cloud.ply     真实 RGB 点云(置信过滤 + 地面对齐 + 可选去天花板)
+  cloud_viz.ply 按时间上色点云(备用)
+  floorplan.png 俯视户型图(相机轨迹 PCA 基底 + magma hexbin)
+  view_ob.png   3D 斜视(真实 RGB, 立正)
+  view_top.png  俯视时间色
+  meta.json     帧数/耗时/点数
+
+CLI:  mapping_pipeline.py <video> <out_dir> [--fps 8] [--ceiling-cut] [--ceiling-keep 0.85]
+"""
+import os, sys, time, json, argparse, tempfile, shutil
+
+MODEL_ID = os.environ.get("ABOT_MODEL_ID", "acvlab/ABot-Recon")
+
+
+def loop_enabled():
+    return os.environ.get("ABOT_LOOP", "0") == "1"
+
+
+def npu_backend():
+    return os.environ.get("ABOT_BACKEND", "").lower() in ("axera", "axcl", "ax650", "npu")
+
+
+def load_ready_model(model_id=None, use_sdpa=True, device="cuda"):
+    """Load ABot-Recon ready to infer.
+
+    ABOT_BACKEND=axera → encoder/decoder_step/heads on an Axera NPU (AXCL card or on-chip
+    AX650, see abot_axera) with the host AdjacentPoseHead on CPU. No CUDA, no HF checkpoint.
+    Same abot_recon.ABotRecon wrapper, so poses/world_points/confidence come out identical
+    to the torch path. Loop closure needs CUDA and is off on the NPU path.
+
+    Otherwise: upstream torch path. `model_id` is a HF repo id or a local checkpoint dir;
+    loop_closure gated on ABOT_LOOP=1 (SALAD + DINOv2 assets)."""
+    if npu_backend():
+        from abot_axera.backend import build_abot_recon
+        deliv = os.environ.get("ABOT_DELIVERY", "/home/axera/abot650/ABot-Recon_AX650_交付包_20260907")
+        return build_abot_recon(
+            model_dir=os.environ.get("ABOT_MODELS", "/home/axera/ABot-Recon"),
+            suffix=os.environ.get("ABOT_MODEL_SUFFIX", "_kitti02"),
+            device_id=int(os.environ.get("ABOT_DEVICE_ID", "0")),
+            pose_weights=os.environ.get("ABOT_POSE_WEIGHTS",
+                                        os.path.join(deliv, "host_pose_head", "pose_head.safetensors")),
+            pose_config=os.environ.get("ABOT_POSE_CONFIG",
+                                       os.path.join(deliv, "host_pose_head", "pose_head_config.json")),
+        )
+    from abot_recon import ABotRecon
+    kw = dict(device=device, attention_backend="sdpa")
+    if loop_enabled():
+        kw.update(loop_closure=True,
+                  loop_salad_checkpoint=os.environ.get("ABOT_LOOP_SALAD", "/app/loop-assets/dino_salad.ckpt"),
+                  loop_dino_checkpoint=os.environ.get("ABOT_LOOP_DINO", "/app/loop-assets/dinov2_vitb14_pretrain.pth"),
+                  loop_output_dir=os.environ.get("ABOT_LOOP_OUT", "/data/jobs/_loop"))
+    else:
+        kw.update(loop_closure=False)
+    return ABotRecon.from_pretrained(model_id or MODEL_ID, **kw)
+
+
+def _progress():
+    try:
+        from abot_axera import progress
+        return progress
+    except Exception:
+        class _Null:
+            def __getattr__(self, _):
+                return lambda *a, **k: None
+        return _Null()
+
+
+def _extract_frames(video, fps, out_dir):
+    """Uniform fps sampling → jpgs in temporal order."""
+    import cv2
+    cap = cv2.VideoCapture(video)
+    src = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    interval = max(1, round(src / max(fps, 1)))
+    idx, saved = 0, []
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if idx % interval == 0:
+            p = os.path.join(out_dir, f"{len(saved):06d}.jpg")
+            cv2.imwrite(p, frame); saved.append(p)
+        idx += 1
+    cap.release()
+    return saved
+
+
+def _grav_basis(cams):
+    """world→floor basis (columns e1,e2,up) from PCA of the camera trajectory. Smallest-variance
+    axis of the camera centers is the floor normal (up); largest is the main walking axis (e1).
+    Gives a clean top-down (the camera down-axis would tilt with pitch and smear walls)."""
+    import numpy as np
+    cc = cams - cams.mean(0)
+    _, _, Vt = np.linalg.svd(cc, full_matrices=False)
+    up = Vt[2]; e1 = Vt[0]
+    e2 = np.cross(up, e1); e2 /= np.linalg.norm(e2) + 1e-9
+    return np.stack([e1, e2, up], 1).astype(np.float32)
+
+
+def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
+        model=None, model_id=None, device="cuda"):
+    import numpy as np, torch
+    from PIL import Image
+    from abot_recon.preprocessing import preprocess_image
+    prog = _progress()
+    os.makedirs(out_dir, exist_ok=True)
+    t0 = time.time()
+    meta = {"video": os.path.basename(video), "fps": fps, "engine": "ABot-Recon"}
+
+    # ---- frames: uniform fps sampling to a temp dir ----
+    fdir = tempfile.mkdtemp(prefix="abot_frames_")
+    try:
+        prog.clear(); prog.set_phase("extract")
+        frames = _extract_frames(video, fps, fdir)
+        meta["frames"] = len(frames)
+        print(f"[abot] extracted {len(frames)} frames @ fps={fps} from {os.path.basename(video)}", flush=True)
+        if not frames:
+            raise RuntimeError("no frames decoded from video")
+
+        # ---- inference (reuse a pre-loaded model if given) ----
+        if model is None:
+            model = load_ready_model(model_id, True, device)
+        t_inf = time.time()
+        dense = list(range(len(frames)))
+        loop = loop_enabled()
+        result = model.infer(frames, output_world_points=True, output_confidence=True,
+                             loop_closure=loop, dense_output_indices=dense)
+        meta["infer_s"] = round(time.time() - t_inf, 1); meta["loop_closure"] = loop
+
+        poses = result.camera_poses.detach().cpu().numpy().astype(np.float32)   # [N,4,4] c2w
+        wp = result.world_points.detach().cpu().numpy()                          # [M,H,W,3] world
+        conf = result.confidence.detach().cpu().numpy() if result.confidence is not None else None
+
+        # colors: preprocess the dense frames (same 504x280 tensor the model saw)
+        cols = []
+        for i in dense:
+            with Image.open(frames[i]) as im:
+                tns, _ = preprocess_image(im)
+            cols.append((tns.clamp(0, 1) * 255).round().to(torch.uint8).permute(1, 2, 0).numpy())
+        col = np.stack(cols)                                                     # [M,H,W,3] uint8
+    finally:
+        shutil.rmtree(fdir, ignore_errors=True)
+
+    cams = poses[:, :3, 3].astype(np.float32)
+    M, H, W = wp.shape[0], wp.shape[1], wp.shape[2]
+    st = 2
+    P = wp[:, ::st, ::st, :].reshape(-1, 3).astype(np.float32)
+    C = (col[:, ::st, ::st, :].reshape(-1, 3).astype(np.float32) / 255.0).clip(0, 1)
+    hh, ww = (H + st - 1) // st, (W + st - 1) // st
+    T = np.repeat(np.arange(M, dtype=np.float32), hh * ww)
+    F = conf[:, ::st, ::st].reshape(-1) if conf is not None else np.ones(len(P), np.float32)
+
+    m = np.isfinite(P).all(1)
+    if conf is not None:
+        pos = F > 0
+        m &= pos & (F >= np.percentile(F[pos], 45))     # conf gate (45th pctile)
+    P, C, T = P[m], C[m], T[m]
+    meta["points_raw"] = int(len(P))
+
+    # gravity-align to the floor basis, then orient +z = up via the camera down-axis (c2w col1),
+    # rotating 180° about x if inverted (proper rotation) so the room stands upright everywhere.
+    Bg = _grav_basis(cams); P = (P @ Bg).astype(np.float32); cams = cams @ Bg
+    if float(poses[:, :3, 1].mean(0) @ Bg[:, 2]) > 0:
+        P[:, 1] *= -1; P[:, 2] *= -1; cams[:, 1] *= -1; cams[:, 2] *= -1
+
+    # drop far global-drift geometry: keep only points within the WALKED area (camera-trajectory
+    # xy bbox + margin). ABot's sequential composition can fling a chunk of geometry far from the
+    # path (no loop closure); without this the floorplan/3D frame around empty space. The camera
+    # path covers the real rooms, so bbox+margin keeps the rooms and cuts the drift.
+    if len(P):
+        cxy0, cxy1 = cams[:, :2].min(0), cams[:, :2].max(0)
+        mrg = 0.35 * float((cxy1 - cxy0).max()) + 1e-6
+        inb = ((P[:, 0] > cxy0[0] - mrg) & (P[:, 0] < cxy1[0] + mrg) &
+               (P[:, 1] > cxy0[1] - mrg) & (P[:, 1] < cxy1[1] + mrg))
+        meta["walked_area_kept"] = [int(inb.sum()), int(len(inb))]
+        P, C, T = P[inb], C[inb], T[inb]
+
+    # optional ceiling removal: keep a fraction of the floor→ceiling span from the floor (+z up)
+    if ceiling_cut and len(P):
+        up_h = P[:, 2]; lo, hi = np.percentile(up_h, 1), np.percentile(up_h, 99)
+        keep = up_h <= lo + float(ceiling_keep) * (hi - lo)
+        meta["ceiling_cut"] = {"keep_frac": round(float(ceiling_keep), 2),
+                               "kept": int(keep.sum()), "of": int(len(keep))}
+        P, C, T = P[keep], C[keep], T[keep]
+
+    np.savez_compressed(os.path.join(out_dir, "recon.npz"),
+                        cams=cams.astype(np.float32), poses=poses)
+
+    import matplotlib.cm as cm
+    tnorm = (T - T.min()) / max(1.0, float(T.max() - T.min()))
+    Ctime = cm.turbo(tnorm)[:, :3].astype(np.float32)
+
+    # ---- point clouds (Open3D): cloud.ply (真实 RGB, 网页主视图) + cloud_viz.ply (时间色, 备用) ----
+    import open3d as o3d
+    # voxel size from the ROBUST (1–99 pctile) extent, not full ptp: ABot's global drift throws
+    # a few points far out and inflates full-ptp ~5x, which would over-coarsen the cloud to ~200k.
+    span = float((np.percentile(P, 99, 0) - np.percentile(P, 1, 0)).mean())
+    vox = max(1e-3, span / 550)
+    def _cloud(colors, path):
+        p = o3d.geometry.PointCloud()
+        p.points = o3d.utility.Vector3dVector(P.astype(np.float64))
+        p.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
+        p = p.voxel_down_sample(voxel_size=vox)
+        o3d.io.write_point_cloud(path, p); return p
+    pcd = _cloud(C, os.path.join(out_dir, "cloud.ply"))
+    _cloud(Ctime, os.path.join(out_dir, "cloud_viz.ply"))
+    meta["cloud_points"] = len(pcd.points)
+
+    _render(out_dir, P, C, Ctime, cams, meta)
+
+    meta["total_s"] = round(time.time() - t0, 1)
+    json.dump(meta, open(os.path.join(out_dir, "meta.json"), "w"), ensure_ascii=False, indent=1)
+    print("products:", sorted(os.listdir(out_dir)))
+    print("meta:", json.dumps(meta, ensure_ascii=False))
+    prog.clear()
+    return meta
+
+
+def _render(out_dir, P, Crgb, Ctime, cams, meta):
+    # P, cams already aligned to the floor basis: x=e1, y=e2, z=up (upright).
+    import numpy as np, matplotlib
+    matplotlib.use("Agg"); import matplotlib.pyplot as plt
+    BG = "#0a0e13"
+    x, y, hgt = P[:, 0], P[:, 1], P[:, 2]; cx_, cy_ = cams[:, 0], cams[:, 1]
+
+    # ---- floorplan: top-down density (magma hexbin) + trajectory, clipped to 1–99 pctile ----
+    xl, xh = np.percentile(x, 1), np.percentile(x, 99)
+    yl, yh = np.percentile(y, 1), np.percentile(y, 99)
+    k = (x > xl) & (x < xh) & (y > yl) & (y < yh)
+    fig = plt.figure(figsize=(13, 9)); ax = fig.add_subplot(111); ax.set_facecolor(BG)
+    ax.hexbin(x[k], y[k], gridsize=300, cmap="magma", bins="log", linewidths=0)
+    ax.plot(cx_, cy_, color="#35d0c0", lw=2.4)
+    ax.scatter(cx_[0], cy_[0], c="#7CFF6B", s=90, edgecolors="white", linewidths=1.2, zorder=5)
+    ax.set_aspect("equal"); ax.invert_yaxis(); ax.axis("off"); fig.patch.set_facecolor(BG)
+    fig.savefig(os.path.join(out_dir, "floorplan.png"), dpi=130, facecolor=BG, bbox_inches="tight", pad_inches=0.15)
+    plt.close(fig)
+
+    # ---- 3D oblique, REAL RGB, upright ----
+    sel = np.random.default_rng(0).choice(len(P), min(500000, len(P)), replace=False)
+    Q, QC = P[sel], np.clip(Crgb[sel], 0, 1); lo, hi = np.percentile(P, 2, 0), np.percentile(P, 98, 0)
+    fig = plt.figure(figsize=(12, 10)); ax = fig.add_subplot(111, projection="3d")
+    ax.set_facecolor(BG); fig.patch.set_facecolor(BG)
+    ax.scatter(Q[:, 0], Q[:, 1], Q[:, 2], c=QC, s=.45, linewidths=0)
+    ax.plot(cams[:, 0], cams[:, 1], cams[:, 2], color="#e6edf3", lw=1.1)
+    ax.set_xlim(lo[0], hi[0]); ax.set_ylim(lo[1], hi[1]); ax.set_zlim(lo[2], hi[2])
+    ax.set_box_aspect((hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2]))
+    ax.view_init(elev=32, azim=-110); ax.axis("off")
+    fig.savefig(os.path.join(out_dir, "view_ob.png"), dpi=120, facecolor=BG, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+    # ---- top-down, time-colored ----
+    fig = plt.figure(figsize=(11, 9)); ax = fig.add_subplot(111); ax.set_facecolor(BG)
+    ax.scatter(x[k], y[k], c=Ctime[k], s=.4, linewidths=0)
+    ax.plot(cx_, cy_, color="#e6edf3", lw=1.0)
+    ax.set_aspect("equal"); ax.invert_yaxis(); ax.axis("off"); fig.patch.set_facecolor(BG)
+    fig.savefig(os.path.join(out_dir, "view_top.png"), dpi=120, facecolor=BG, bbox_inches="tight", pad_inches=0.1)
+    plt.close(fig)
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("video"); ap.add_argument("out_dir")
+    ap.add_argument("--fps", type=int, default=8)
+    ap.add_argument("--model", default=None, help="HF repo id or local checkpoint dir")
+    ap.add_argument("--ceiling-cut", action="store_true")
+    ap.add_argument("--ceiling-keep", type=float, default=0.85)
+    args = ap.parse_args()
+    run(args.video, args.out_dir, fps=args.fps, model_id=args.model,
+        ceiling_cut=args.ceiling_cut, ceiling_keep=args.ceiling_keep)

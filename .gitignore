@@ -1,0 +1,18 @@
+# runtime output + logs
+jobs/
+*.log
+*.log.*
+# local test assets (videos / frames / reference dumps)
+testdata/
+# editor backups
+*.bak
+*.bak.*
+*.bak[0-9]*
+# python
+__pycache__/
+*.pyc
+.venv/
+# models live outside the repo
+*.axmodel
+*.onnx
+*.safetensors

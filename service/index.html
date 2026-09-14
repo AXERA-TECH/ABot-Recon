@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ABot-Recon 建图</title>
+<style>
+  :root{
+    --bg:#0e1217; --panel:#161c24; --panel2:#1b222c; --line:#28313d;
+    --text:#e6edf3; --muted:#8b97a7; --accent:#2dd4bf; --accent-d:#12a594;
+    --amber:#f0b429; --good:#34d399; --bad:#f87171; --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--text);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    font-size:14px;line-height:1.5}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  a{color:var(--accent);text-decoration:none}
+  header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;
+    padding:14px 22px;background:rgba(14,18,23,.85);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line)}
+  header h1{font-size:16px;font-weight:600;margin:0;letter-spacing:.02em}
+  header .sub{color:var(--muted);font-size:12px}
+  .spacer{flex:1}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none}
+  .dot.off{background:#5b6675}.dot.loading{background:var(--amber);animation:pulse 1s infinite}
+  .dot.online{background:var(--good)}.dot.error{background:var(--bad)}
+  @keyframes pulse{50%{opacity:.35}}
+  main{display:grid;grid-template-columns:390px 1fr;gap:18px;padding:18px 22px;max-width:1500px;margin:0 auto}
+  @media(max-width:900px){main{grid-template-columns:1fr}}
+  .col{display:flex;flex-direction:column;gap:18px;min-width:0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);
+    margin:0;padding:13px 16px;border-bottom:1px solid var(--line);font-weight:600}
+  .card .body{padding:16px}
+  .row{display:flex;align-items:center;gap:10px}
+  .row+.row{margin-top:12px}
+  label.fld{color:var(--muted);font-size:12px;min-width:42px}
+  select,button,input[type=text]{font:inherit;color:var(--text);background:var(--panel2);
+    border:1px solid var(--line);border-radius:9px;padding:8px 11px}
+  select{flex:1;cursor:pointer}
+  button{cursor:pointer;transition:.15s;font-weight:500}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent-d);border-color:var(--accent-d);color:#04120f}
+  button.primary:hover{background:var(--accent)}
+  button.ghost{background:transparent}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .statusline{display:flex;align-items:center;gap:9px;margin:14px 0 8px;font-size:13px}
+  .statusline b{font-weight:600}
+  .bar{height:7px;background:var(--panel2);border-radius:6px;overflow:hidden;border:1px solid var(--line)}
+  .bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent-d),var(--accent));
+    border-radius:6px;transition:width .4s}
+  .meta{color:var(--muted);font-size:12px;margin-top:8px;display:flex;gap:14px;flex-wrap:wrap}
+  .drop{border:1.5px dashed #3a4655;border-radius:11px;padding:26px 16px;text-align:center;
+    color:var(--muted);cursor:pointer;transition:.15s}
+  .drop:hover,.drop.over{border-color:var(--accent);color:var(--text);background:rgba(45,212,191,.05)}
+  .drop b{color:var(--text);display:block;font-size:15px;margin-bottom:4px}
+  .opts{display:flex;align-items:center;gap:16px;margin-top:12px;flex-wrap:wrap;font-size:13px}
+  .opts label{display:flex;align-items:center;gap:6px;color:var(--muted);cursor:pointer}
+  .jobs{display:flex;flex-direction:column}
+  .job{padding:12px 16px;border-bottom:1px solid var(--line)}
+  .job:last-child{border-bottom:none}
+  .job .top{display:flex;align-items:center;gap:9px}
+  .job .name{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .chip{font-size:11px;padding:2px 9px;border-radius:20px;font-weight:600;flex:none}
+  .chip.queued,.chip.running{background:rgba(240,180,41,.16);color:var(--amber)}
+  .chip.done{background:rgba(52,211,153,.16);color:var(--good)}
+  .chip.error{background:rgba(248,113,113,.16);color:var(--bad)}
+  .job .info{color:var(--muted);font-size:12px;margin-top:5px}
+  .job .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px}
+  .job .acts a,.job .acts button{font-size:12px;padding:5px 9px;border-radius:8px}
+  .job .acts button.danger:hover{border-color:var(--bad);color:var(--bad)}
+  .view{position:relative;background:#000;border:1px solid var(--line);border-radius:var(--radius);
+    overflow:hidden;min-height:460px;flex:1;display:flex}
+  .view iframe{border:0;width:100%;height:100%;min-height:460px;background:#000}
+  .view .hint{position:absolute;top:10px;right:12px;background:rgba(14,18,23,.8);
+    border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:12px;color:var(--muted)}
+  .floor{text-align:center;background:#0b0e12}
+  .floor img{max-width:100%;display:block;margin:0 auto;border-radius:8px}
+  .floor .empty{color:var(--muted);padding:40px}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel2);
+    border:1px solid var(--line);border-radius:10px;padding:11px 18px;opacity:0;transition:.3s;pointer-events:none;z-index:9}
+  .toast.show{opacity:1}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="svcDot"></span>
+  <h1>ABot-Recon 建图</h1>
+  <span class="sub">视频 → 点云 · 网格 · 俯视图 · 重定位地图</span>
+  <span class="spacer"></span>
+  <span class="sub" id="gpuInfo">—</span>
+</header>
+
+<main>
+  <div class="col">
+    <!-- 模型热加载 -->
+    <div class="card">
+      <h2>模型(热加载)</h2>
+      <div class="body">
+        <div class="row">
+          <label class="fld">模型</label>
+          <select id="modelSel"></select>
+        </div>
+        <div class="statusline">
+          <span class="dot" id="mDot"></span><span id="mText">—</span>
+        </div>
+        <div class="bar"><i id="mBar"></i></div>
+        <div class="meta"><span id="mIdle"></span><span id="mMem"></span></div>
+        <div class="row" style="margin-top:14px">
+          <button class="primary" id="btnLoad" style="flex:1">加载模型</button>
+          <button class="ghost" id="btnUnload" style="flex:1">卸载</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 上传视频 -->
+    <div class="card">
+      <h2>上传视频建图</h2>
+      <div class="body">
+        <div class="drop" id="drop">
+          <b>拖入视频 或 点击选择</b>
+          <span id="dropHint">支持 mp4 / mov …</span>
+        </div>
+        <input type="file" id="file" accept="video/*" hidden>
+        <div class="opts">
+          <label title="每秒抽多少帧送入重建。越高越稠密/越慢,室内步行推荐 8;快速预览用 3–5">
+            抽帧率
+            <input type="number" id="fps" value="8" min="1" max="15" step="1"
+                   style="width:54px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:5px 7px;font:inherit">
+            fps
+          </label>
+          <label title="去掉天花板附近的点(天花板无纹理、噪点多,俯视图更干净)">
+            <input type="checkbox" id="ceilCut"> 去天花板
+          </label>
+          <label title="保留 地面→天花板 竖直高度的比例(越小切得越多);仅在'去天花板'勾选时生效">
+            保留高度
+            <input type="number" id="ceilKeep" value="0.85" min="0.3" max="1" step="0.05"
+                   style="width:58px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:5px 7px;font:inherit">
+          </label>
+        </div>
+        <button class="primary" id="btnSubmit" style="width:100%;margin-top:14px" disabled>开始建图</button>
+      </div>
+    </div>
+
+    <!-- 任务 -->
+    <div class="card">
+      <h2>任务</h2>
+      <div class="jobs" id="jobs"><div class="job info">暂无任务</div></div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="card" style="flex:1;display:flex;flex-direction:column">
+      <h2>3D 点云 / 相机轨迹（viser）</h2>
+      <div class="view">
+        <iframe id="viser" title="viser"></iframe>
+        <span class="hint">滚轮缩放 · 拖拽旋转 · 右键平移</span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>俯视平面图</h2>
+      <div class="floor" id="floor"><div class="empty">选择一个已完成任务查看俯视图</div></div>
+    </div>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+const H=location.hostname, API="";                 // same origin
+$("#viser").src = `http://${H}:__VISER_PORT__`;      // viser port injected by service
+let selFloor=null;
+
+function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("show");
+  clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove("show"),2200);}
+
+async function jget(u){const r=await fetch(API+u);if(!r.ok)throw 0;return r.json();}
+async function jpost(u){const r=await fetch(API+u,{method:"POST"});return r.ok?r.json():null;}
+
+// ---- models dropdown (once) ----
+let modelsInit=false;
+async function initModels(){
+  try{const d=await jget("/models");
+    const sel=$("#modelSel");sel.innerHTML="";
+    for(const n of Object.keys(d.models)){
+      const o=document.createElement("option");o.value=n;
+      o.textContent=n+(d.models[n].available?"":" (未下载)");
+      o.disabled=!d.models[n].available;sel.appendChild(o);}
+    sel.value=d.selected;modelsInit=true;
+    sel.onchange=()=>jpost(`/models/select?name=${sel.value}`);
+  }catch(e){}
+}
+$("#btnLoad").onclick=async()=>{await jpost(`/models/load?name=${$("#modelSel").value}`);toast("开始加载模型…");};
+$("#btnUnload").onclick=async()=>{await jpost("/models/unload");toast("已卸载");};
+
+// ---- status poll ----
+const ICON={offline:"off",loading:"loading",online:"online",error:"error"};
+const LABEL={offline:"未加载",loading:"加载中",online:"在线",error:"错误"};
+async function pollStatus(){
+  try{const s=await jget("/status");
+    $("#svcDot").className="dot "+(ICON[s.status]||"off");
+    $("#mDot").className="dot "+(ICON[s.status]||"off");
+    let t=LABEL[s.status]||s.status;
+    if(s.status==="online"&&s.loaded)t+=` · ${s.loaded}`;
+    if(s.status==="online"&&s.busy)t+=" · 处理中";
+    if(s.status==="loading")t+=` · ${s.selected}`;
+    if(s.status==="error")t+=` · ${s.error||""}`;
+    $("#mText").innerHTML=`<b>${t}</b>`;
+    $("#mBar").style.width=(s.status==="online"?100:s.status==="loading"?s.progress:0)+"%";
+    $("#mIdle").textContent = s.busy ? "任务处理中(不会自动卸载)"
+      : (s.idle_sec!=null?`空闲 ${s.idle_sec}s / ${Math.round(s.auto_unload_sec/60)}分后自动卸载`:"");
+    $("#mMem").textContent="";
+    $("#gpuInfo").textContent=s.busy?"NPU 推理中":"NPU 空闲";
+  }catch(e){$("#svcDot").className="dot error";$("#gpuInfo").textContent="服务离线";}
+}
+
+// ---- jobs ----
+function fmtJob(id,j){
+  const st=j.status||"?";const m=j.meta||{};
+  const acts=[];
+  if(st==="done"){
+    acts.push(`<button class="ghost" onclick="view3d('${id}')">在3D查看</button>`);
+    const P=j.products||[];
+    if(P.includes("floorplan.png"))acts.push(`<button class="ghost" onclick="showFloor('${id}')">俯视图</button>`);
+    for(const f of ["cloud.ply","mesh.ply","place_map.nvclip"])
+      if(P.includes(f))acts.push(`<a href="/jobs/${id}/${f}" download>${f}</a>`);
+  }
+  if(st==="done"||st==="error")acts.push(`<button class="ghost" onclick="rerun('${id}')">重跑</button>`);
+  acts.push(`<button class="ghost danger" onclick="delJob('${id}')">删除</button>`);
+  let info, extra="";
+  if(st==="done"){
+    info=`${m.fps||j.fps||"?"}fps · ${m.frames||"?"} 帧 · ${m.cloud_points||"?"} 点${m.ceiling_cut?" · 去顶":""} · ${m.total_s||"?"}s`;
+  }else if(st==="error"){
+    info=(j.error||"").slice(0,80);
+  }else{
+    const p=j.progress||{};
+    const used=p.elapsed_s!=null?` · 已用 ${fmtDur(p.elapsed_s)}`:"";
+    const eta=p.eta_s!=null?` · 预计剩余 ${fmtDur(p.eta_s)}`:"";
+    if(p.phase==="infer"&&p.total){
+      const pct=Math.round(100*p.frame/p.total);
+      const spf=p.sec_per_frame?` · ${p.sec_per_frame}s/帧`:"";
+      info=`推理中… 帧 ${p.frame}/${p.total} (${pct}%)${spf}${used}${eta}`;
+      extra=`<div class="bar" style="margin-top:6px"><i style="width:${pct}%"></i></div>`;
+    }else if(p.phase==="post"){
+      info=`后处理中(位姿/点云/渲染)…${used}${eta}`;
+      extra=`<div class="bar" style="margin-top:6px"><i style="width:100%"></i></div>`;
+    }else if(p.phase==="extract"){
+      info=`抽帧中…(${j.fps||"?"}fps)${used}`;
+      extra=`<div class="bar" style="margin-top:6px"><i style="width:100%;opacity:.35"></i></div>`;
+    }else{
+      info=`处理中…(${j.fps||"?"}fps,加载模型中…)`;
+      extra=`<div class="bar" style="margin-top:6px"><i style="width:100%;opacity:.35"></i></div>`;
+    }
+  }
+  return `<div class="job"><div class="top">
+      <span class="name mono">${(j.video||id)}</span>
+      <span class="chip ${st}">${LABEL2(st)}</span></div>
+      <div class="info">${info} · <span class="mono">${id.slice(0,8)}</span> · ${j.model||""}</div>
+      ${extra}
+      ${acts.length?`<div class="acts">${acts.join("")}</div>`:""}</div>`;
+}
+function fmtDur(sec){sec=Math.max(0,Math.round(sec));const m=Math.floor(sec/60),s=sec%60;return m?`${m}分${String(s).padStart(2,"0")}秒`:`${s}秒`;}
+const LABEL2=s=>({queued:"排队",running:"处理中",done:"完成",error:"失败",unknown:"—"}[s]||s);
+async function pollJobs(){
+  try{const d=await jget("/jobs");
+    const ids=Object.keys(d).sort((a,b)=>(d[b].t||0)-(d[a].t||0));
+    $("#jobs").innerHTML=ids.length?ids.map(id=>fmtJob(id,d[id])).join(""):`<div class="job info">暂无任务</div>`;
+  }catch(e){}
+}
+async function view3d(id){await jpost(`/jobs/${id}/view`);
+  $("#viser").src=`http://${H}:__VISER_PORT__/?t=`+Date.now();toast("已载入 3D 视图");}
+function showFloor(id){selFloor=id;
+  $("#floor").innerHTML=`<img src="/jobs/${id}/floorplan.png?t=${Date.now()}">`;}
+async function rerun(id){const r=await fetch(`/jobs/${id}/rerun`,{method:"POST"});
+  if(r.ok){toast("已重新提交");pollJobs();}else toast("重跑失败");}
+async function delJob(id){if(!confirm("删除该任务及其全部产物?"))return;
+  await fetch(`/jobs/${id}`,{method:"DELETE"});toast("已删除");
+  if(selFloor===id){selFloor=null;$("#floor").innerHTML='<div class="empty">选择一个已完成任务查看俯视图</div>';}
+  pollJobs();}
+
+// ---- upload ----
+let picked=null;
+const drop=$("#drop"),file=$("#file");
+drop.onclick=()=>file.click();
+file.onchange=()=>{if(file.files[0]){picked=file.files[0];
+  $("#dropHint").textContent=picked.name;$("#btnSubmit").disabled=false;}};
+["dragover","dragenter"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add("over");}));
+["dragleave","drop"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove("over");}));
+drop.addEventListener("drop",ev=>{const f=ev.dataTransfer.files[0];
+  if(f){picked=f;$("#dropHint").textContent=f.name;$("#btnSubmit").disabled=false;}});
+$("#btnSubmit").onclick=async()=>{
+  if(!picked)return;
+  $("#btnSubmit").disabled=true;$("#btnSubmit").textContent="上传中…";
+  try{
+    const fd=new FormData();
+    fd.append("file",picked);
+    fd.append("mask_sky","false");                       // ABot backend ignores sky mask; sent for API compat
+    fd.append("model",$("#modelSel").value||"ABot-Recon");
+    fd.append("fps",$("#fps").value||8);
+    fd.append("ceiling_cut",$("#ceilCut").checked);
+    fd.append("ceiling_keep",$("#ceilKeep").value||0.85);
+    const r=await fetch("/jobs",{method:"POST",body:fd});
+    if(!r.ok)throw new Error("HTTP "+r.status);
+    const d=await r.json();
+    toast("已提交,开始建图:"+(d.job_id||"").slice(0,8));
+    picked=null;file.value="";$("#dropHint").textContent="支持 mp4 / mov …";
+    pollJobs();
+  }catch(e){toast("提交失败:"+((e&&e.message)?e.message:e));$("#btnSubmit").disabled=false;}
+  $("#btnSubmit").textContent="开始建图";
+};
+
+initModels();
+setInterval(()=>{pollStatus();if(!modelsInit)initModels();},1200);
+setInterval(pollJobs,1500);
+pollStatus();pollJobs();
+</script>
+</body>
+</html>
