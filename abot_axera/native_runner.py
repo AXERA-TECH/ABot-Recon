@@ -299,7 +299,7 @@ def _chk(ret: int, what: str):
 class NativeChainRunner:
     """encoder -> decoder_step -> heads with device-resident KV cache.
 
-    Public API (used by abot_axera.backend.NpuReleasedModel):
+    Public API (used by abot_axera.backend.AbotRecon):
         reset()                                   zero the KV cache (start of a sequence)
         step(image[1,3,H,W] f32, frame_index) ->  {"camera_features","local_points","confidence"} (host)
         close()

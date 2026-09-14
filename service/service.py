@@ -23,13 +23,11 @@ import numpy as np
 
 DATA = os.environ.get("MAP_DATA", "/data/jobs")
 FPS = int(os.environ.get("MAP_FPS", "8"))
-USE_SDPA = True
 IDLE_UNLOAD = int(os.environ.get("MAP_IDLE_UNLOAD", "1800"))   # 30 min
 EST_LOAD_SEC = float(os.environ.get("MAP_EST_LOAD_SEC", "30")) # progress-bar estimate
 os.makedirs(DATA, exist_ok=True)
 
-# ABot-Recon: single model entry. On the NPU path (ABOT_BACKEND=axera) the id is informational;
-# on the torch path it is the HF repo id / local checkpoint dir.
+# ABot-Recon: single model entry (name shown in the dashboard dropdown).
 MODELS = {"ABot-Recon": os.environ.get("ABOT_MODEL_ID", "acvlab/ABot-Recon")}
 DEFAULT_MODEL = "ABot-Recon"
 
@@ -48,7 +46,7 @@ class ModelManager:
     """热加载:按需载入 GPU、空闲自动卸载、可切换 3 个模型。"""
     def __init__(self):
         self.lock = threading.Lock()
-        self.model = None            # loaded torch model or None
+        self.model = None            # loaded AbotRecon or None
         self.loaded_name = None      # which model is in GPU
         self.name = DEFAULT_MODEL    # currently SELECTED (target)
         self.status = "offline"      # offline | loading | online | error
@@ -59,15 +57,16 @@ class ModelManager:
 
     # ---- internals (assume lock held) ----
     def _unload_locked(self):
-        import torch, gc
-        self.model = None; self.loaded_name = None
+        import gc
+        m, self.model, self.loaded_name = self.model, None, None
+        close = getattr(getattr(m, "runner", None), "close", None)
+        if close is not None:
+            try: close()                       # free device buffers + unload axmodels
+            except Exception as e: print("runner close:", e)
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
         self.status = "offline"; self.progress = 0
 
     def _load_locked(self, name):
-        import torch
         if name not in MODELS:
             raise ValueError(f"unknown model {name}")
         if self.loaded_name == name and self.model is not None:
@@ -85,7 +84,7 @@ class ModelManager:
         th = threading.Thread(target=_tick, daemon=True); th.start()
         try:
             from mapping_pipeline import load_ready_model
-            self.model = load_ready_model(path, USE_SDPA, "cuda")
+            self.model = load_ready_model(path)
             self.loaded_name = name; self.status = "online"; self.progress = 100
             self.last_used = time.time()
         except Exception as e:
@@ -115,13 +114,7 @@ class ModelManager:
         self.name = name
 
     def gpu_mem(self):
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return round(torch.cuda.memory_allocated()/1e9, 2), round(torch.cuda.memory_reserved()/1e9, 2)
-        except Exception:
-            pass
-        return None, None
+        return None, None                      # NPU memory is device-resident; nothing to report here
 
     def snapshot(self):
         alloc, res = self.gpu_mem()
@@ -371,7 +364,7 @@ def _redraw_cloud():
 
 
 def _load_viser_cloud(job_id):
-    import open3d as o3d
+    from abot_axera.pointcloud import read_ply
     srv = _viser["server"]
     if srv is None:
         return
@@ -381,9 +374,9 @@ def _load_viser_cloud(job_id):
     ply = os.path.join(d, "cloud.ply")
     if not os.path.exists(ply):
         ply = os.path.join(d, "cloud_viz.ply")
-    pcd = o3d.io.read_point_cloud(ply)
-    pts = np.asarray(pcd.points, np.float32)
-    col = (np.clip(np.asarray(pcd.colors), 0, 1) * 255).astype(np.uint8)
+    pts, col = read_ply(ply)
+    if col is None:
+        col = np.full((len(pts), 3), 200, np.uint8)
 
     # ABot mapping_pipeline already writes cloud.ply floor-aligned AND upright, and stores the
     # matching aligned camera centers as recon.npz["cams"] — so here we just load them (no flip,

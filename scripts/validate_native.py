@@ -24,11 +24,10 @@ KV_SHAPE = (1, 18, 16, 11, 725, 64)
 
 
 def load_frames(frames_dir, n):
-    from abot_recon.preprocessing import iter_preprocessed
+    from abot_axera.preprocess import iter_preprocessed
     paths = sorted(glob.glob(os.path.join(frames_dir, "*.jpg")))[:n]
     assert paths, f"no jpgs in {frames_dir}"
-    return paths, [np.ascontiguousarray(t.unsqueeze(0).numpy(), dtype=np.float32)
-                   for t, _ in iter_preprocessed(paths, height=280, width=504)]
+    return paths, [np.ascontiguousarray(x[None], dtype=np.float32) for x, _ in iter_preprocessed(paths, height=280, width=504)]
 
 
 def run_pyaxengine(imgs, dev, model_dir, suffix):

@@ -8,6 +8,10 @@ testdata/
 *.bak
 *.bak.*
 *.bak[0-9]*
+# compiled helpers (abot_axera/csrc built on first use)
+abot_axera/_build/
+*.so
+!abot_axera/prebuilt/*.so
 # python
 __pycache__/
 *.pyc

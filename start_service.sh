@@ -5,7 +5,6 @@
 export PATH=/usr/bin/axcl:$PATH
 
 # --- inference backend ---
-export ABOT_BACKEND="${ABOT_BACKEND:-axera}"          # axera = Axera NPU path (abot_axera); anything else = upstream torch/GPU
 export ABOT_RUNNER="${ABOT_RUNNER:-native}"           # native (KV on device, ~3 s/frame) | pyaxengine (reference, ~9.5 s/frame)
 export ABOT_DEVICE="${ABOT_DEVICE:-auto}"             # auto | axcl (PCIe card) | ax650 (on-chip)
 export ABOT_DEVICE_ID="${ABOT_DEVICE_ID:-6}"          # AXCL card index (dell: 0-5 belong to ax-llm)

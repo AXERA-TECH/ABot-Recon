@@ -1,12 +1,12 @@
-"""NPU-backed ABot-Recon model with the torch `infer_paths` output contract.
+"""ABot-Recon inference on an Axera NPU, torch-free.
 
 Streaming chain (delivery docs/模型说明_中文.md):
   frame -> preprocess[1,3,280,504] -> encoder -> patch_tokens[1,720,1024]
         -> decoder_step (+right-aligned KV-cache, present_* fed straight back)
         -> fused_hidden[1,725,2048]
         -> heads -> local_points[1,280,504,3], camera_features[1,725,512], confidence logits
-  then host AdjacentPoseHead streams camera_features -> c2w camera_poses[N,4,4]
-  world_points = R @ local_points + t   (abot_recon.geometry.transform_local_points)
+  then the host AdjacentPoseHead (numpy) streams camera_features -> c2w camera_poses[N,4,4]
+  world_points = R @ local_points + t ; confidence = sigmoid(logits)
 
 Runner flavours (ABOT_RUNNER):
   native      (default) native_runner.NativeChainRunner — KV cache and the intermediates stay on
@@ -14,35 +14,21 @@ Runner flavours (ABOT_RUNNER):
               on-chip AX650 (libax_engine); ABOT_DEVICE=auto|axcl|ax650 picks the runtime.
   pyaxengine  runners.PyAxEngineRunner — one pyaxengine InferenceSession per model; every call
               round-trips the 2x588 MB KV through the host (~9.5 s/frame). Reference / fallback.
-
-The returned dict matches abot_recon.model.ReleasedABotReconModel.infer_paths, so upstream
-ABotRecon.infer (api.py) — relative poses, confidence masking — runs verbatim on top.
 """
 from __future__ import annotations
 
-import json
 import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-import torch
 
 from . import progress
+from .pose_head import AdjacentPoseHead
+from .preprocess import iter_preprocessed
 
 KV_SHAPE = (1, 18, 16, 11, 725, 64)
-
-
-def load_pose_head(weights, config, device: str = "cpu"):
-    from safetensors.torch import load_file
-
-    from .pose_head import AdjacentPoseHead
-
-    cfg = json.loads(Path(config).read_text(encoding="utf-8"))
-    cfg.pop("class", None)
-    model = AdjacentPoseHead(**cfg).to(device).eval()
-    model.load_state_dict(load_file(str(weights), device=device), strict=True)
-    return model
 
 
 def make_runner(model_dir: str, device_id: int = 0, suffix: str = "_kitti02",
@@ -61,29 +47,45 @@ def make_runner(model_dir: str, device_id: int = 0, suffix: str = "_kitti02",
     raise ValueError(f"ABOT_RUNNER={kind!r} (native | pyaxengine)")
 
 
-class NpuReleasedModel:
-    """Same interface as torch ReleasedABotReconModel; an NPU (or ONNX) runner inside."""
+def transform_local_points(local_points: np.ndarray, camera_poses: np.ndarray) -> np.ndarray:
+    """[N,H,W,3] camera-frame points + [N,4,4] c2w -> world points."""
+    R = camera_poses[:, :3, :3]
+    t = camera_poses[:, :3, 3]
+    return np.einsum("nij,nhwj->nhwi", R, local_points) + t[:, None, None]
 
-    def __init__(self, runner, pose_head, *, height: int = 280, width: int = 504):
+
+def relative_from_c2w(camera_poses: np.ndarray) -> np.ndarray:
+    """Adjacent transforms mapping frame t coordinates into frame t+1: inv(P[t+1]) @ P[t]."""
+    if len(camera_poses) < 2:
+        return np.empty((0, 4, 4), camera_poses.dtype)
+    return np.linalg.solve(camera_poses[1:], camera_poses[:-1])
+
+
+@dataclass
+class ReconResult:
+    camera_poses: np.ndarray                 # [N,4,4] c2w, frame 0 = identity
+    relative_poses: np.ndarray               # [N-1,4,4]
+    local_points: np.ndarray | None = None   # [M,H,W,3]
+    world_points: np.ndarray | None = None   # [M,H,W,3]
+    confidence: np.ndarray | None = None     # [M,H,W] in (0,1)
+    metadata: dict = field(default_factory=dict)
+
+
+class AbotRecon:
+    """Streaming reconstruction: image paths -> poses / world points / confidence (numpy)."""
+
+    def __init__(self, runner, pose_head: AdjacentPoseHead, *, height: int = 280, width: int = 504):
         self.runner = runner
         self.pose = pose_head
-        self.height = int(height)
-        self.width = int(width)
-        # attributes some upstream code probes for
-        self.device_name = "cpu"
-        self.attention_backend = getattr(runner, "provider", "npu")
-        # native runner: one call per frame, KV never leaves the device
+        self.height, self.width = int(height), int(width)
+        self.provider = getattr(runner, "provider", "npu")
         self._native = hasattr(runner, "step") and hasattr(runner, "reset")
 
-    def reset(self) -> None:
-        # KV-cache and pose state are local to each infer_paths call; nothing to clear.
-        return None
-
-    # ---- per-frame chain: two flavours, same outputs ----
-    def _frame_native(self, image: np.ndarray, fi: int, _state):
+    # ---- per-frame chain: native runner or three sessions, same outputs ----
+    def _frame_native(self, image, fi, _state):
         return self.runner.step(image, fi), None
 
-    def _frame_sessions(self, image: np.ndarray, fi: int, state):
+    def _frame_sessions(self, image, fi, state):
         past_key, past_value, past_valid = state
         patch_tokens = self.runner.run_encoder(image)
         dec = self.runner.run_decoder({
@@ -91,18 +93,21 @@ class NpuReleasedModel:
             "past_key": past_key, "past_value": past_value, "past_valid": past_valid,
             "frame_index": np.array([fi], np.float32),
         })
-        # present_* fed straight back as next frame's past_* (right-aligned cache)
         state = tuple(np.ascontiguousarray(dec[k], dtype=np.float32)
                       for k in ("present_key", "present_value", "present_valid"))
         return self.runner.run_heads(np.ascontiguousarray(dec["fused_hidden"], dtype=np.float32)), state
 
-    @torch.inference_mode()
-    def infer_paths(self, paths, *, output_local_points: bool, output_world_points: bool,
-                    output_confidence: bool, dense_output_indices=None, image_observer=None) -> dict:
-        from abot_recon.geometry import transform_local_points
-        from abot_recon.preprocessing import iter_preprocessed
-
+    def infer(self, image_paths, *, output_local_points: bool = False, output_world_points: bool = True,
+              output_confidence: bool = True, dense_output_indices=None, loop_closure: bool = False,
+              **_ignored) -> ReconResult:
+        paths = [Path(p) for p in image_paths]
+        if not paths:
+            raise ValueError("image_paths must contain at least one frame")
+        if loop_closure:
+            print("[abot] loop_closure requested but not available on the NPU path; ignored", flush=True)
         want_points = bool(output_local_points or output_world_points)
+        keep = list(range(len(paths))) if dense_output_indices is None else [int(i) for i in dense_output_indices]
+        keep_set = set(keep)
 
         if self._native:
             self.runner.reset()
@@ -111,71 +116,45 @@ class NpuReleasedModel:
             step = self._frame_sessions
             state = (np.zeros(KV_SHAPE, np.float32), np.zeros(KV_SHAPE, np.float32), np.zeros((1,), np.float32))
 
-        cam_feats: list[np.ndarray] = []
-        local_list: list[np.ndarray] = []
-        conf_list: list[np.ndarray] = []
-
-        n_total = len(paths) if hasattr(paths, "__len__") else -1
-        progress.start_infer(n_total, hint_spf=3.0 if self._native else 9.5)
-        print(f"[abot] infer start: {n_total} frames via {self.attention_backend}", flush=True)
-
-        for fi, (tns, _) in enumerate(iter_preprocessed(paths, height=self.height, width=self.width)):
+        self.pose.reset()
+        poses, local, conf = [], {}, {}
+        n = len(paths)
+        progress.start_infer(n, hint_spf=3.0 if self._native else 9.5)
+        print(f"[abot] infer start: {n} frames via {self.provider}", flush=True)
+        for fi, (chw, _) in enumerate(iter_preprocessed(paths, height=self.height, width=self.width)):
             t0 = time.time()
-            if image_observer is not None:
-                image_observer(tns.unsqueeze(0).unsqueeze(0))
-            image = np.ascontiguousarray(tns.unsqueeze(0).numpy(), dtype=np.float32)
-            heads, state = step(image, fi, state)
-            cam_feats.append(np.ascontiguousarray(heads["camera_features"], dtype=np.float32))
-            if want_points:
-                local_list.append(np.ascontiguousarray(heads["local_points"][0], dtype=np.float32))
-            if output_confidence:
-                conf_list.append(np.ascontiguousarray(heads["confidence"][0], dtype=np.float32))
-            progress.upd(fi + 1, n_total)
-            print(f"[abot] frame {fi + 1}/{n_total} done in {time.time() - t0:.1f}s", flush=True)
-
+            heads, state = step(chw[None], fi, state)
+            poses.append(self.pose.step(heads["camera_features"][0]))
+            if fi in keep_set:
+                if want_points:
+                    local[fi] = np.ascontiguousarray(heads["local_points"][0], dtype=np.float32)
+                if output_confidence:
+                    conf[fi] = np.ascontiguousarray(heads["confidence"][0], dtype=np.float32)
+            progress.upd(fi + 1, n)
+            print(f"[abot] frame {fi + 1}/{n} done in {time.time() - t0:.1f}s", flush=True)
         progress.set_phase("post")
-        # host pose head: stream camera_features -> c2w poses (frame 0 = identity).
-        # Poses are always composed over the FULL sequence (never subsampled).
-        pstate, poses = None, []
-        for feat_np in cam_feats:
-            feat = torch.from_numpy(feat_np).float().unsqueeze(1)  # [1,1,725,512]
-            pose, pstate = self.pose(feat, camera_state=pstate, return_state=True)
-            poses.append(pose[:, 0])  # [1,4,4]
-        camera_poses = torch.cat(poses, dim=0).float()  # [N,4,4]
 
-        # dense outputs: torch returns local/world/conf only for dense_output_indices
-        # (default = every frame). Mirror that so upstream api.py stays exact.
-        n = len(cam_feats)
-        keep = list(range(n)) if dense_output_indices is None else list(dense_output_indices)
-
-        out: dict = {"camera_poses": camera_poses, "attention_backend": self.attention_backend}
+        camera_poses = np.stack(poses).astype(np.float32)
+        res = ReconResult(camera_poses=camera_poses, relative_poses=relative_from_c2w(camera_poses),
+                          metadata={"frames": n, "provider": self.provider, "loop_closure": False,
+                                    "dense_output_indices": keep})
         if want_points:
-            local = torch.from_numpy(np.stack([local_list[i] for i in keep], axis=0)).float()  # [M,H,W,3]
-            out["local_points"] = local
+            lp = np.stack([local[i] for i in keep])
+            if output_local_points:
+                res.local_points = lp
             if output_world_points:
-                dense_poses = camera_poses[keep] if dense_output_indices is not None else camera_poses
-                out["world_points"] = transform_local_points(local, dense_poses)
+                res.world_points = transform_local_points(lp, camera_poses[keep])
         if output_confidence:
-            logits = torch.from_numpy(np.stack([conf_list[i] for i in keep], axis=0)).float()  # [M,H,W,1]
+            logits = np.stack([conf[i] for i in keep])
             if logits.ndim == 4 and logits.shape[-1] == 1:
                 logits = logits[..., 0]
-            out["confidence"] = torch.sigmoid(logits)  # [M,H,W]
-        return out
+            res.confidence = 1.0 / (1.0 + np.exp(-logits))
+        return res
 
 
 def build_abot_recon(*, model_dir: str, pose_weights: str, pose_config: str, device_id: int = 0,
                      suffix: str = "_kitti02", runner=None, runner_kind: str | None = None,
-                     device: str | None = None):
-    """abot_recon.ABotRecon whose backbone runs on an Axera NPU (or the supplied runner)."""
-    from abot_recon import ABotRecon, InferenceConfig
-
+                     device: str | None = None) -> AbotRecon:
     if runner is None:
         runner = make_runner(model_dir, device_id, suffix, runner_kind, device)
-    pose = load_pose_head(pose_weights, pose_config, device="cpu")
-    model = NpuReleasedModel(runner, pose)
-    config = InferenceConfig().override(
-        device="cpu", amp_dtype="fp32", attention_backend="sdpa",
-        output_local_points=True, output_world_points=True, output_confidence=True,
-        loop_closure=False,
-    )
-    return ABotRecon(model, config)
+    return AbotRecon(runner, AdjacentPoseHead(pose_weights, pose_config))

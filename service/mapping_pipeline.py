@@ -2,8 +2,7 @@
 """ABot-Recon 建图流水线 — 一个视频 → 点云 + 户型俯视图 + 3D 视图。
 
 推理核心是 ABot-Recon(acvlab/ABot-Recon):流式前馈重建,直接输出 c2w 位姿 + 世界坐标点图 +
-置信度。ABOT_BACKEND=axera 时 encoder/decoder/heads 跑在 Axera NPU 上(abot_axera 包),
-否则走上游 torch 路径(需要 GPU)。
+置信度。encoder/decoder/heads 跑在 Axera NPU 上,位姿头和后处理是 numpy(abot_axera 包,无 torch)。
 
 产物(写入 out_dir):
   recon.npz     对齐后的相机中心 cams[N,3] + 原始 poses[N,4,4](网页轨迹用)
@@ -18,49 +17,21 @@ CLI:  mapping_pipeline.py <video> <out_dir> [--fps 8] [--ceiling-cut] [--ceiling
 """
 import os, sys, time, json, argparse, tempfile, shutil
 
-MODEL_ID = os.environ.get("ABOT_MODEL_ID", "acvlab/ABot-Recon")
-
-
-def loop_enabled():
-    return os.environ.get("ABOT_LOOP", "0") == "1"
-
-
-def npu_backend():
-    return os.environ.get("ABOT_BACKEND", "").lower() in ("axera", "axcl", "ax650", "npu")
-
-
-def load_ready_model(model_id=None, use_sdpa=True, device="cuda"):
-    """Load ABot-Recon ready to infer.
-
-    ABOT_BACKEND=axera → encoder/decoder_step/heads on an Axera NPU (AXCL card or on-chip
-    AX650, see abot_axera) with the host AdjacentPoseHead on CPU. No CUDA, no HF checkpoint.
-    Same abot_recon.ABotRecon wrapper, so poses/world_points/confidence come out identical
-    to the torch path. Loop closure needs CUDA and is off on the NPU path.
-
-    Otherwise: upstream torch path. `model_id` is a HF repo id or a local checkpoint dir;
-    loop_closure gated on ABOT_LOOP=1 (SALAD + DINOv2 assets)."""
-    if npu_backend():
-        from abot_axera.backend import build_abot_recon
-        deliv = os.environ.get("ABOT_DELIVERY", "/home/axera/abot650/ABot-Recon_AX650_交付包_20260907")
-        return build_abot_recon(
-            model_dir=os.environ.get("ABOT_MODELS", "/home/axera/ABot-Recon"),
-            suffix=os.environ.get("ABOT_MODEL_SUFFIX", "_kitti02"),
-            device_id=int(os.environ.get("ABOT_DEVICE_ID", "0")),
-            pose_weights=os.environ.get("ABOT_POSE_WEIGHTS",
-                                        os.path.join(deliv, "host_pose_head", "pose_head.safetensors")),
-            pose_config=os.environ.get("ABOT_POSE_CONFIG",
-                                       os.path.join(deliv, "host_pose_head", "pose_head_config.json")),
-        )
-    from abot_recon import ABotRecon
-    kw = dict(device=device, attention_backend="sdpa")
-    if loop_enabled():
-        kw.update(loop_closure=True,
-                  loop_salad_checkpoint=os.environ.get("ABOT_LOOP_SALAD", "/app/loop-assets/dino_salad.ckpt"),
-                  loop_dino_checkpoint=os.environ.get("ABOT_LOOP_DINO", "/app/loop-assets/dinov2_vitb14_pretrain.pth"),
-                  loop_output_dir=os.environ.get("ABOT_LOOP_OUT", "/data/jobs/_loop"))
-    else:
-        kw.update(loop_closure=False)
-    return ABotRecon.from_pretrained(model_id or MODEL_ID, **kw)
+def load_ready_model(model_id=None, use_sdpa=True, device=None):
+    """Build the NPU-backed ABot-Recon (abot_axera.backend.AbotRecon). All settings come from env:
+    ABOT_MODELS / ABOT_MODEL_SUFFIX (axmodels), ABOT_DEVICE_ID, ABOT_RUNNER, ABOT_DEVICE,
+    ABOT_DELIVERY (host_pose_head/) or ABOT_POSE_WEIGHTS / ABOT_POSE_CONFIG. `model_id` is ignored."""
+    from abot_axera.backend import build_abot_recon
+    deliv = os.environ.get("ABOT_DELIVERY", "/home/axera/abot650/ABot-Recon_AX650_交付包_20260907")
+    return build_abot_recon(
+        model_dir=os.environ.get("ABOT_MODELS", "/home/axera/ABot-Recon"),
+        suffix=os.environ.get("ABOT_MODEL_SUFFIX", "_kitti02"),
+        device_id=int(os.environ.get("ABOT_DEVICE_ID", "0")),
+        pose_weights=os.environ.get("ABOT_POSE_WEIGHTS",
+                                    os.path.join(deliv, "host_pose_head", "pose_head.safetensors")),
+        pose_config=os.environ.get("ABOT_POSE_CONFIG",
+                                   os.path.join(deliv, "host_pose_head", "pose_head_config.json")),
+    )
 
 
 def _progress():
@@ -106,10 +77,11 @@ def _grav_basis(cams):
 
 
 def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
-        model=None, model_id=None, device="cuda"):
-    import numpy as np, torch
+        model=None, model_id=None, device=None):
+    import numpy as np
     from PIL import Image
-    from abot_recon.preprocessing import preprocess_image
+    from abot_axera.preprocess import preprocess_image
+    from abot_axera.pointcloud import VoxelGrid, write_ply
     prog = _progress()
     os.makedirs(out_dir, exist_ok=True)
     t0 = time.time()
@@ -130,21 +102,20 @@ def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
             model = load_ready_model(model_id, True, device)
         t_inf = time.time()
         dense = list(range(len(frames)))
-        loop = loop_enabled()
         result = model.infer(frames, output_world_points=True, output_confidence=True,
-                             loop_closure=loop, dense_output_indices=dense)
-        meta["infer_s"] = round(time.time() - t_inf, 1); meta["loop_closure"] = loop
+                             dense_output_indices=dense)
+        meta["infer_s"] = round(time.time() - t_inf, 1)
 
-        poses = result.camera_poses.detach().cpu().numpy().astype(np.float32)   # [N,4,4] c2w
-        wp = result.world_points.detach().cpu().numpy()                          # [M,H,W,3] world
-        conf = result.confidence.detach().cpu().numpy() if result.confidence is not None else None
+        poses = result.camera_poses.astype(np.float32)   # [N,4,4] c2w
+        wp = result.world_points                         # [M,H,W,3] world
+        conf = result.confidence                         # [M,H,W] or None
 
         # colors: preprocess the dense frames (same 504x280 tensor the model saw)
         cols = []
         for i in dense:
             with Image.open(frames[i]) as im:
-                tns, _ = preprocess_image(im)
-            cols.append((tns.clamp(0, 1) * 255).round().to(torch.uint8).permute(1, 2, 0).numpy())
+                chw, _ = preprocess_image(im)
+            cols.append(np.round(np.clip(chw, 0, 1) * 255).astype(np.uint8).transpose(1, 2, 0))
         col = np.stack(cols)                                                     # [M,H,W,3] uint8
     finally:
         shutil.rmtree(fdir, ignore_errors=True)
@@ -198,21 +169,15 @@ def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
     tnorm = (T - T.min()) / max(1.0, float(T.max() - T.min()))
     Ctime = cm.turbo(tnorm)[:, :3].astype(np.float32)
 
-    # ---- point clouds (Open3D): cloud.ply (真实 RGB, 网页主视图) + cloud_viz.ply (时间色, 备用) ----
-    import open3d as o3d
+    # ---- point clouds: cloud.ply (真实 RGB, 网页主视图) + cloud_viz.ply (时间色, 备用) ----
     # voxel size from the ROBUST (1–99 pctile) extent, not full ptp: ABot's global drift throws
     # a few points far out and inflates full-ptp ~5x, which would over-coarsen the cloud to ~200k.
     span = float((np.percentile(P, 99, 0) - np.percentile(P, 1, 0)).mean())
     vox = max(1e-3, span / 550)
-    def _cloud(colors, path):
-        p = o3d.geometry.PointCloud()
-        p.points = o3d.utility.Vector3dVector(P.astype(np.float64))
-        p.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
-        p = p.voxel_down_sample(voxel_size=vox)
-        o3d.io.write_point_cloud(path, p); return p
-    pcd = _cloud(C, os.path.join(out_dir, "cloud.ply"))
-    _cloud(Ctime, os.path.join(out_dir, "cloud_viz.ply"))
-    meta["cloud_points"] = len(pcd.points)
+    grid = VoxelGrid(P, vox); Pv = grid.mean(P)                # one voxel assignment, two color sets
+    write_ply(os.path.join(out_dir, "cloud.ply"), Pv, grid.mean(C))
+    write_ply(os.path.join(out_dir, "cloud_viz.ply"), Pv, grid.mean(Ctime))
+    meta["cloud_points"] = int(len(Pv))
 
     _render(out_dir, P, C, Ctime, cams, meta)
 

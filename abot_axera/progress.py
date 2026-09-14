@@ -2,7 +2,7 @@
 
 Writers:
   mapping_pipeline.run      set_phase("extract") / set_phase("post") / clear()
-  backend.infer_paths       start_infer(total, hint_spf) then upd(frame) per frame
+  backend.AbotRecon.infer   start_infer(total, hint_spf) then upd(frame) per frame
 Reader:
   service GET /jobs         get() -> attached to the running job; index.html draws
                             "帧 i/N · 已用 · 预计剩余".

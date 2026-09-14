@@ -16,11 +16,10 @@ sys.path.insert(0, ROOT)
 def make_ref(path):
     """Card side: dump image / patch_tokens / fused_hidden / heads outputs of frame 0 (testdata/frames12)."""
     import glob
-    from abot_recon.preprocessing import iter_preprocessed
+    from abot_axera.preprocess import iter_preprocessed
     from abot_axera.native_runner import NativeChainRunner
     p = sorted(glob.glob(os.path.join(ROOT, "testdata", "frames12", "*.jpg")))[:1]
-    img = [np.ascontiguousarray(t.unsqueeze(0).numpy(), dtype=np.float32)
-           for t, _ in iter_preprocessed(p, height=280, width=504)][0]
+    img = [np.ascontiguousarray(x[None], dtype=np.float32) for x, _ in iter_preprocessed(p, height=280, width=504)][0]
     r = NativeChainRunner(os.environ.get("ABOT_MODELS", "/home/axera/ABot-Recon"),
                           device_id=int(os.environ.get("ABOT_DEVICE_ID", "0")))
     out = r.step(img, 0)
