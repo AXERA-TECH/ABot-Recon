@@ -129,11 +129,33 @@ pyaxengine 的 `InferenceSession.run()` 每次调用把**所有**输入拷上设
 时间估算:`总时长 ≈ 模型加载(首次 ~23 s)+ 抽帧 + N × 3.0 s + 后处理(≈ 0.13 s × N + 5 s)`,
 N ≈ 视频秒数 × 采样 fps(默认 8)。一分钟视频约 25 分钟。网页进度条会按实测的每帧耗时给出预计剩余时间。
 
-### 内存
+### CMM 占用(AXCL 卡,axcl-smi 逐个加载实测,2026-09-14)
 
-- AXCL 卡:三个模型 ~3.2 GB CMM + KV 乒乓 2.35 GB ≈ 5.6 GB。
-- AX650 片上同样需要 ≈ 5.6 GB CMM。常见开发板 CMM 只预留 4–4.6 GB,跑不下 decoder_step;
-  encoder + heads(~1 GB)已在板上验证与卡上逐位一致(`scripts/onchip_check.py`)。
+| 项 | CMM |
+|---|---|
+| encoder | 337 MiB |
+| decoder_step | 2513 MiB(权重文件 818 MB,其余是模型内部工作区) |
+| heads | 217 MiB |
+| KV 乒乓缓冲(past/present key+value,4 × 588 MB fp32) | 2243 MiB |
+| **合计(服务常驻)** | **5341 MiB**(AXCL 卡 CMM 共 7040 MiB) |
+
+- AX650 片上需要同样的 ≈ 5.3 GB CMM。手头开发板 CMM 只有 4096 / 4608 MiB,三个模型 + KV **放不下**,
+  目前板上只验证了 encoder + heads(~0.6 GB)。要在板上跑整链路,可选:
+  1. 板子 bootargs 把 CMM 预留调到 ≥ 6 GB(8 GB DDR 的板子 Linux 留 2 GB 够跑主机侧);
+  2. pulsar2 重新导出 decoder_step,KV 输入输出改 fp16(缓冲减半到 1.1 GB,合计 ≈ 4.2 GB);
+  3. KV 就地更新(present 直接绑到 past 的缓冲,再省 1.1 GB)—— 需要先确认模型内部是先读完 past 再写 present。
+  2 + 3 合计 ≈ 3.1 GB,4 GB CMM 的板子即可。
+
+### 推理耗时汇总
+
+| 环节 | AXCL 卡(dell) | AX650 板(.166) |
+|---|---|---|
+| encoder(NPU) | 0.19 s | 0.19 s |
+| decoder_step(NPU) | 2.63 s | 未测(CMM 不够) |
+| heads(NPU) | 0.13 s | 0.13 s |
+| 每帧合计(原生 runner,含预处理和位姿头) | 3.00 s | — |
+| 模型加载 | 23 s | encoder 3 s + heads 2 s |
+| 346 帧任务总时(推理 + 后处理) | 1084 s(推理 1045 s) | — |
 
 ---
 
