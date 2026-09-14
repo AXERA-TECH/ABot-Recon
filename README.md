@@ -1,29 +1,29 @@
 # ABot-Recon on Axera NPU
 
-[ABot-Recon](https://huggingface.co/acvlab/ABot-Recon) 在 Axera NPU 上的推理实现:输入一段视频,输出相机位姿、世界坐标点云和置信度,并附带一个建图服务(网页上传视频 → 点云 / 户型俯视图 / 3D 查看)。
+[ABot-Recon](https://huggingface.co/acvlab/ABot-Recon) 在 Axera NPU 上的推理实现:输入视频,输出相机位姿、世界坐标点云和置信度;附带建图服务(网页上传视频 → 点云 / 户型俯视图 / 3D 查看)。
 
-支持两种运行形态,同一套代码:
+支持两种运行形态:
 
 | 形态 | 运行时 | 设备 |
 |---|---|---|
 | AXCL | libaxcl_rt | 主机 + AX650N PCIe 卡 |
 | AX650 片上 | libax_engine / libax_sys | AX650N 板 |
 
-主机侧全部为 numpy 实现(预处理、位姿头、点云),不依赖 torch / open3d。
+主机侧为 numpy 实现,不依赖 torch / open3d。
 
 ## 目录结构
 
 ```
 abot_axera/                 推理核心
-  native_runner.py          encoder → decoder_step → heads 链式推理,KV cache 常驻设备(AXCL / 片上)
-  runners.py                参考实现:pyaxengine 逐模型 InferenceSession / ONNX Runtime
+  native_runner.py          NPU 链式推理(AXCL / 片上)
+  runners.py                参考实现(pyaxengine / ONNX Runtime)
   backend.py                AbotRecon:图片序列 → 位姿 / 世界点 / 置信度
-  pose_head.py              主机侧 AdjacentPoseHead(numpy)
-  preprocess.py + csrc/     帧预处理(C 缩放内核,cffi 调用;prebuilt/ 内含 aarch64 预编译)
-  pointcloud.py             体素下采样、PLY 读写
-  progress.py               任务进度与预估剩余时间
-service/                    FastAPI 服务 + viser 3D + 网页面板
-scripts/                    验证与基准脚本
+  pose_head.py              位姿头
+  preprocess.py, csrc/      帧预处理
+  pointcloud.py             点云
+  progress.py               任务进度
+service/                    FastAPI 服务 + viser 3D + 网页
+scripts/                    验证脚本
 ```
 
 ## 模型与依赖
@@ -34,9 +34,7 @@ scripts/                    验证与基准脚本
 | `host_pose_head/pose_head.safetensors`、`pose_head_config.json` | `ABOT_POSE_WEIGHTS`、`ABOT_POSE_CONFIG`(或 `ABOT_DELIVERY` 交付包目录) | 主机侧位姿头 |
 | `models/onnx/*.onnx` | `ABOT_DELIVERY` | 运行不需要,仅 `scripts/validate_onnx.py` 评估量化误差时使用 |
 
-Python 依赖见 `requirements.txt`:推理只需 numpy、cffi、Pillow;服务另需 opencv、matplotlib、viser、fastapi、uvicorn。Axera 运行时与 pyaxengine 来自 SDK。
-
-缩放内核在首次导入时用 gcc 编译到 `abot_axera/_build/`;没有编译器时使用 `abot_axera/prebuilt/` 中的预编译库(aarch64),都没有时退回 numpy 实现。
+Python 依赖见 `requirements.txt`:推理只需 numpy、cffi、Pillow;服务另需 opencv、matplotlib、viser、fastapi、uvicorn。Axera 运行时与 pyaxengine 来自 SDK。预处理内核首次导入时自动编译(需 gcc),aarch64 已带预编译库。
 
 ## 运行
 
@@ -53,7 +51,7 @@ tmux new-session -d -s abot "bash start_service.sh > service_run.log 2>&1"   # �
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `ABOT_RUNNER` | `native` | `native`:KV 常驻设备;`pyaxengine`:逐模型 InferenceSession(参考实现) |
+| `ABOT_RUNNER` | `native` | `native` / `pyaxengine`(参考实现) |
 | `ABOT_DEVICE` | `auto` | `axcl` / `ax650` / `auto` |
 | `ABOT_DEVICE_ID` | `0` | AXCL 卡号(片上忽略) |
 | `ABOT_MODELS` / `ABOT_MODEL_SUFFIX` | `/home/axera/ABot-Recon` / `_kitti02` | axmodel 目录与文件名后缀 |
@@ -76,7 +74,7 @@ GET  /status              模型状态;POST /models/load|unload
 
 ## 资源消耗
 
-模型输入 280×504,三个 axmodel 逐帧串行。
+模型输入 280×504。
 
 ### CMM(AX650N,axcl-smi 实测)
 
@@ -88,7 +86,7 @@ GET  /status              模型状态;POST /models/load|unload
 | KV cache 缓冲(4 × 588 MB fp32) | 2243 MiB |
 | 合计(常驻) | 5341 MiB |
 
-AXCL 卡 CMM 为 7040 MiB。片上运行需要同样的约 5.3 GB CMM;CMM 为 4–4.6 GB 的开发板放不下完整链路(只验证了 encoder + heads)。可选方案:调大板子的 CMM 预留至 6 GB 以上;将 decoder_step 的 KV 输入输出改为 fp16 重新导出(缓冲减半);KV 就地更新(需确认模型内部读写顺序)。
+AXCL 卡 CMM 为 7040 MiB。片上运行需同样约 5.3 GB CMM,板子 CMM 预留需 ≥ 6 GB。
 
 ### 耗时(AX650N)
 
@@ -103,9 +101,7 @@ AXCL 卡 CMM 为 7040 MiB。片上运行需要同样的约 5.3 GB CMM;CMM 为 4�
 | 位姿头 | ~10 ms | ~64 ms |
 | 后处理(346 帧:位姿、点云、渲染) | ~40 s | — |
 
-`ABOT_RUNNER=pyaxengine` 时每帧约 9.5 s。
-
-估算:`总时长 ≈ 模型加载 + 抽帧 + N × 3.0 s + 后处理(≈ 0.13 s × N)`,N ≈ 视频秒数 × 抽帧率。例:346 帧(43 s 视频,8 fps)任务总时 1084 s。
+估算:`总时长 ≈ 模型加载 + 抽帧 + N × 3.0 s + 0.13 s × N`,N ≈ 视频秒数 × 抽帧率。例:346 帧(43 s 视频,8 fps)任务 1084 s。`ABOT_RUNNER=pyaxengine` 时每帧约 9.5 s。
 
 ## 验证脚本
 
