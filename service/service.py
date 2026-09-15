@@ -412,7 +412,7 @@ def _redraw_cloud():
         return
     keep = float(_viser["ceil_slider"].value) if _viser.get("ceil_slider") is not None else 1.0
     lo, hi = _viser["cloud_zspan"]; zcut = lo + keep * (hi - lo)
-    mode = _viser["mode"].value if _viser.get("mode") is not None else "高斯"
+    mode = _viser["mode"].value if _viser.get("mode") is not None else "点云"
     sp = _viser.get("splats")
     if mode == "高斯" and sp is not None:
         cen, rgb, op, cov = sp
@@ -420,12 +420,9 @@ def _redraw_cloud():
         # browser budget: random subset, splats enlarged by the density ratio so surfaces stay closed
         vmax = int(os.environ.get("MAP_SPLATS_VIEW", "400000"))
         idx = np.flatnonzero(m)
-        if len(idx) > vmax:
+        if len(idx) > vmax:                     # subset only; no enlargement (it blurs)
             idx = np.random.default_rng(0).choice(idx, vmax, replace=False)
-            k = float(len(m.nonzero()[0]) / vmax)
-            covs = cov[idx] * k                 # sigma * sqrt(k) in every axis
-        else:
-            covs = cov[idx]
+        covs = cov[idx]
         if _viser.get("cloud_handle") is not None:
             _viser["cloud_handle"].remove(); _viser["cloud_handle"] = None
         _viser["splat_handle"] = srv.scene.add_gaussian_splats("/splats", cen[idx], covs, rgb[idx], op[idx])
@@ -489,7 +486,7 @@ def _load_viser_cloud(job_id):
     _viser["base_psize"] = (float(np.ptp(pts, 0).mean()) / 400) if len(pts) else 0.01
 
     srv.scene.reset(); _viser["cloud_handle"] = None; _viser["splat_handle"] = None
-    _redraw_cloud()                                    # splats (default) or points, with current ceiling filter
+    _redraw_cloud()                                    # points (default) or splats, with current ceiling filter
     if cams is not None:
         th = srv.scene.add_spline_catmull_rom("/trajectory", positions=cams,
                                               color=(45, 212, 191), line_width=3.0)
@@ -506,7 +503,7 @@ def _build_viser():
     _viser["server"] = srv
     srv.scene.set_up_direction("+z")                # room is z-up → natural orbit / reset view
 
-    md = srv.gui.add_dropdown("显示方式", ("高斯", "点云"), initial_value="高斯")
+    md = srv.gui.add_dropdown("显示方式", ("点云", "高斯"), initial_value="点云")
     _viser["mode"] = md
 
     @md.on_update
