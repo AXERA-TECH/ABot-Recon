@@ -64,6 +64,8 @@ tmux new-session -d -s abot "bash start_service.sh > service_run.log 2>&1"   # �
 | `ABOT_DEVICE_ID` | `0` | AXCL 卡号(片上忽略) |
 | `ABOT_DECODER` | `auto` | 视频解码:`ax`(pyaxvideo 硬解,H.264/H.265)/ `cv2`;`auto` 优先硬解,不支持的编码自动退回 cv2 |
 | `ABOT_AX_RESIZE` | `ivps2x` | 硬解后的缩放:`ivps2x` IVPS 缩到 1008 宽再由 host 精确缩到 504;`ivps` 直接缩到 504;`host` 全分辨率下卡 |
+| `ABOT_AX_RANGE` | `tv` | 硬解颜色量程:IVPS 按全量程转 RGB,`tv` 在 host 把 16–235 展开到 0–255(手机/相机视频);`pc` 不处理 |
+| `ABOT_AX_FMT` | `bgr` | 传给 pyaxvideo `convert()` 的格式名;0.1.1 版 `bgr` 才得到 RGB 内存序 |
 | `ABOT_MODELS` / `ABOT_MODEL_SUFFIX` | `/home/axera/ABot-Recon` / `_kitti02` | axmodel 目录与文件名后缀 |
 | `ABOT_POSE_WEIGHTS` / `ABOT_POSE_CONFIG` | `$ABOT_DELIVERY/host_pose_head/...` | 位姿头权重与配置 |
 | `MAP_PORT` / `VISER_PORT` | `8011` / `8082` | 服务端口 |

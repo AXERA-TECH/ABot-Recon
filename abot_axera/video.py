@@ -148,12 +148,27 @@ class AxVideoSource:
         ch += ch % 2
         return cw, ch
 
+    # pyaxvideo 0.1.1 hands back the channels swapped: convert("rgb") is BGR in memory and
+    # convert("bgr") is RGB (checked pixel-for-pixel against OpenCV on the same frame).
+    # ABOT_AX_FMT overrides the format string if a future release fixes the naming.
+    AX_FMT = os.environ.get("ABOT_AX_FMT", "bgr")
+    # IVPS converts YUV->RGB with a full-range (pc) BT.601 matrix. Camera/phone videos are almost
+    # always limited (tv) range, so their blacks come out lifted; ABOT_AX_RANGE=tv (default) expands
+    # 16..235 -> 0..255 on the host, ABOT_AX_RANGE=pc leaves the IVPS output as is.
+    AX_RANGE = os.environ.get("ABOT_AX_RANGE", "tv").lower()
+
+    def _range_fix(self, rgb_u8: np.ndarray) -> np.ndarray:
+        if self.AX_RANGE != "tv":
+            return rgb_u8
+        x = (rgb_u8.astype(np.float32) - 16.0) * (255.0 / 219.0)
+        return np.clip(x + 0.5, 0, 255).astype(np.uint8)
+
     def _worker(self, q: queue.Queue, cw, ch):
         try:
             with self.axv.VideoReader(self.path) as r:
                 for i, f in enumerate(r):
                     if i % self.interval == 0:
-                        q.put(f.convert("rgb", cw, ch).to_numpy())
+                        q.put(f.convert(self.AX_FMT, cw, ch).to_numpy())
             q.put(None)
         except Exception as e:
             q.put(e)
@@ -169,6 +184,7 @@ class AxVideoSource:
                 break
             if isinstance(item, Exception):
                 raise RuntimeError(f"pyaxvideo decode failed: {item}")
+            item = self._range_fix(item)
             if self.resize == "host":                          # full-res RGB, exact host preprocessing
                 chw, _ = preprocess_image(item); yield _finish(chw)
             elif self.resize == "ivps2x":                     # IVPS did 2x of the shrink, host the rest
