@@ -62,6 +62,8 @@ tmux new-session -d -s abot "bash start_service.sh > service_run.log 2>&1"   # �
 | `ABOT_RUNNER` | `native` | `native` / `pyaxengine`(参考实现) |
 | `ABOT_DEVICE` | `auto` | `axcl` / `ax650` / `auto` |
 | `ABOT_DEVICE_ID` | `0` | AXCL 卡号(片上忽略) |
+| `ABOT_DECODER` | `auto` | 视频解码:`ax`(pyaxvideo 硬解,H.264/H.265)/ `cv2`;`auto` 优先硬解,不支持的编码自动退回 cv2 |
+| `ABOT_AX_RESIZE` | `ivps2x` | 硬解后的缩放:`ivps2x` IVPS 缩到 1008 宽再由 host 精确缩到 504;`ivps` 直接缩到 504;`host` 全分辨率下卡 |
 | `ABOT_MODELS` / `ABOT_MODEL_SUFFIX` | `/home/axera/ABot-Recon` / `_kitti02` | axmodel 目录与文件名后缀 |
 | `ABOT_POSE_WEIGHTS` / `ABOT_POSE_CONFIG` | `$ABOT_DELIVERY/host_pose_head/...` | 位姿头权重与配置 |
 | `MAP_PORT` / `VISER_PORT` | `8011` / `8082` | 服务端口 |
@@ -145,7 +147,9 @@ docker run -d --name abot -p 8011:8011 -p 8082:8082 --privileged \
   abot-recon:ax650-aarch64
 ```
 
-打开 `http://<host>:8011`。环境变量与上文相同(`-e` 传入);容器内默认 `ABOT_MODELS=/models`、`MAP_DATA=/data/jobs`。
+打开 `http://<host>:8011`。环境变量与上文相同(`-e` 传入);容器内默认 `ABOT_MODELS=/models`、`MAP_DATA=/data/jobs`。镜像内已带 pyaxvideo,H.264 / H.265 视频走硬解。
+
+本地构建:`docker build -f docker/Dockerfile --build-arg TARGET=axcl -t abot-recon:axcl-x86_64 .`;网络慢时可加 `--build-arg APT_MIRROR=mirrors.tuna.tsinghua.edu.cn --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`,wheel 地址可用 `PYAXENGINE_URL` / `PYAXVIDEO_BASE` 覆盖。
 
 ## 验证脚本
 

@@ -26,7 +26,6 @@ import numpy as np
 
 from . import progress
 from .pose_head import AdjacentPoseHead
-from .preprocess import iter_preprocessed
 
 KV_SHAPE = (1, 18, 16, 11, 725, 64)
 
@@ -68,6 +67,7 @@ class ReconResult:
     local_points: np.ndarray | None = None   # [M,H,W,3]
     world_points: np.ndarray | None = None   # [M,H,W,3]
     confidence: np.ndarray | None = None     # [M,H,W] in (0,1)
+    colors: np.ndarray | None = None         # [M,H,W,3] uint8 (output_colors=True)
     metadata: dict = field(default_factory=dict)
 
 
@@ -97,17 +97,17 @@ class AbotRecon:
                       for k in ("present_key", "present_value", "present_valid"))
         return self.runner.run_heads(np.ascontiguousarray(dec["fused_hidden"], dtype=np.float32)), state
 
-    def infer(self, image_paths, *, output_local_points: bool = False, output_world_points: bool = True,
-              output_confidence: bool = True, dense_output_indices=None, loop_closure: bool = False,
-              **_ignored) -> ReconResult:
-        paths = [Path(p) for p in image_paths]
-        if not paths:
-            raise ValueError("image_paths must contain at least one frame")
+    def infer(self, frames, *, output_local_points: bool = False, output_world_points: bool = True,
+              output_confidence: bool = True, output_colors: bool = False, dense_output_indices=None,
+              total: int | None = None, loop_closure: bool = False, **_ignored) -> ReconResult:
+        """frames: image paths, or an iterable of (chw float32 [3,280,504], rgb uint8 [280,504,3]) pairs
+        (see abot_axera.video). `total` gives the frame count for progress when frames is a generator."""
         if loop_closure:
             print("[abot] loop_closure requested but not available on the NPU path; ignored", flush=True)
         want_points = bool(output_local_points or output_world_points)
-        keep = list(range(len(paths))) if dense_output_indices is None else [int(i) for i in dense_output_indices]
-        keep_set = set(keep)
+        if hasattr(frames, "__len__"):
+            total = len(frames)
+        keep_set = None if dense_output_indices is None else {int(i) for i in dense_output_indices}
 
         if self._native:
             self.runner.reset()
@@ -117,22 +117,29 @@ class AbotRecon:
             state = (np.zeros(KV_SHAPE, np.float32), np.zeros(KV_SHAPE, np.float32), np.zeros((1,), np.float32))
 
         self.pose.reset()
-        poses, local, conf = [], {}, {}
-        n = len(paths)
-        progress.start_infer(n, hint_spf=3.0 if self._native else 9.5)
+        poses, local, conf, colors = [], {}, {}, {}
+        n = int(total) if total else -1
+        progress.start_infer(max(n, 0), hint_spf=3.0 if self._native else 9.5)
         print(f"[abot] infer start: {n} frames via {self.provider}", flush=True)
-        for fi, (chw, _) in enumerate(iter_preprocessed(paths, height=self.height, width=self.width)):
+        for fi, item in enumerate(self._iter_frames(frames)):
+            chw, rgb = item
             t0 = time.time()
             heads, state = step(chw[None], fi, state)
             poses.append(self.pose.step(heads["camera_features"][0]))
-            if fi in keep_set:
+            if keep_set is None or fi in keep_set:
                 if want_points:
                     local[fi] = np.ascontiguousarray(heads["local_points"][0], dtype=np.float32)
                 if output_confidence:
                     conf[fi] = np.ascontiguousarray(heads["confidence"][0], dtype=np.float32)
-            progress.upd(fi + 1, n)
+                if output_colors:
+                    colors[fi] = rgb
+            progress.upd(fi + 1, n if n > 0 else None)
             print(f"[abot] frame {fi + 1}/{n} done in {time.time() - t0:.1f}s", flush=True)
         progress.set_phase("post")
+        n = len(poses)
+        if n == 0:
+            raise ValueError("no frames")
+        keep = list(range(n)) if keep_set is None else sorted(i for i in keep_set if i < n)
 
         camera_poses = np.stack(poses).astype(np.float32)
         res = ReconResult(camera_poses=camera_poses, relative_poses=relative_from_c2w(camera_poses),
@@ -149,7 +156,20 @@ class AbotRecon:
             if logits.ndim == 4 and logits.shape[-1] == 1:
                 logits = logits[..., 0]
             res.confidence = 1.0 / (1.0 + np.exp(-logits))
+        if output_colors:
+            res.colors = np.stack([colors[i] for i in keep])
         return res
+
+    def _iter_frames(self, frames):
+        """Normalise the input: paths -> preprocessed pairs; pairs pass through."""
+        from .preprocess import preprocess_image
+        for item in frames:
+            if isinstance(item, (str, Path)):
+                chw, _ = preprocess_image(__import__("PIL.Image", fromlist=["Image"]).open(item))
+                rgb = np.round(np.clip(chw, 0, 1) * 255).astype(np.uint8).transpose(1, 2, 0)
+                yield chw, np.ascontiguousarray(rgb)
+            else:
+                yield item
 
 
 def build_abot_recon(*, model_dir: str, pose_weights: str, pose_config: str, device_id: int = 0,

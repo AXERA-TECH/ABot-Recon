@@ -16,7 +16,7 @@
 
 CLI:  mapping_pipeline.py <video> <out_dir> [--fps 8] [--ceiling-cut] [--ceiling-keep 0.85]
 """
-import os, sys, time, json, argparse, tempfile, shutil
+import os, sys, time, json, argparse
 
 def load_ready_model(model_id=None, use_sdpa=True, device=None):
     """Build the NPU-backed ABot-Recon (abot_axera.backend.AbotRecon). All settings come from env:
@@ -46,25 +46,6 @@ def _progress():
         return _Null()
 
 
-def _extract_frames(video, fps, out_dir):
-    """Uniform fps sampling → jpgs in temporal order."""
-    import cv2
-    cap = cv2.VideoCapture(video)
-    src = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    interval = max(1, round(src / max(fps, 1)))
-    idx, saved = 0, []
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        if idx % interval == 0:
-            p = os.path.join(out_dir, f"{len(saved):06d}.jpg")
-            cv2.imwrite(p, frame); saved.append(p)
-        idx += 1
-    cap.release()
-    return saved
-
-
 def _grav_basis(cams):
     """world→floor basis (columns e1,e2,up) from PCA of the camera trajectory. Smallest-variance
     axis of the camera centers is the floor normal (up); largest is the main walking axis (e1).
@@ -80,8 +61,7 @@ def _grav_basis(cams):
 def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
         model=None, model_id=None, device=None):
     import numpy as np
-    from PIL import Image
-    from abot_axera.preprocess import preprocess_image
+    from abot_axera.video import open_video
     from abot_axera.pointcloud import VoxelGrid, write_ply
     from abot_axera.splats import frame_geometry, build_gaussians, write_splat_ply
     prog = _progress()
@@ -89,38 +69,24 @@ def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
     t0 = time.time()
     meta = {"video": os.path.basename(video), "fps": fps, "engine": "ABot-Recon"}
 
-    # ---- frames: uniform fps sampling to a temp dir ----
-    fdir = tempfile.mkdtemp(prefix="abot_frames_")
-    try:
-        prog.clear(); prog.set_phase("extract")
-        frames = _extract_frames(video, fps, fdir)
-        meta["frames"] = len(frames)
-        print(f"[abot] extracted {len(frames)} frames @ fps={fps} from {os.path.basename(video)}", flush=True)
-        if not frames:
-            raise RuntimeError("no frames decoded from video")
+    # ---- frames: uniform fps sampling straight from the decoder (hardware when available) ----
+    prog.clear(); prog.set_phase("extract")
+    src = open_video(video, fps, device_id=int(os.environ.get("ABOT_DEVICE_ID", "0")))
+    meta["decoder"] = src.name
+    print(f"[abot] decoder={src.name} interval={src.interval} ~{src.total} frames @ fps={fps} from {os.path.basename(video)}", flush=True)
 
-        # ---- inference (reuse a pre-loaded model if given) ----
-        if model is None:
-            model = load_ready_model(model_id, True, device)
-        t_inf = time.time()
-        dense = list(range(len(frames)))
-        result = model.infer(frames, output_world_points=True, output_confidence=True,
-                             dense_output_indices=dense)
-        meta["infer_s"] = round(time.time() - t_inf, 1)
+    # ---- inference (reuse a pre-loaded model if given) ----
+    if model is None:
+        model = load_ready_model(model_id, True, device)
+    t_inf = time.time()
+    result = model.infer(src, output_world_points=True, output_confidence=True, output_colors=True, total=src.total)
+    meta["frames"] = int(result.camera_poses.shape[0]); meta["infer_s"] = round(time.time() - t_inf, 1)
 
-        poses = result.camera_poses.astype(np.float32)   # [N,4,4] c2w
-        wp = result.world_points                         # [M,H,W,3] world
-        conf = result.confidence                         # [M,H,W] or None
-
-        # colors: preprocess the dense frames (same 504x280 tensor the model saw)
-        cols = []
-        for i in dense:
-            with Image.open(frames[i]) as im:
-                chw, _ = preprocess_image(im)
-            cols.append(np.round(np.clip(chw, 0, 1) * 255).astype(np.uint8).transpose(1, 2, 0))
-        col = np.stack(cols)                                                     # [M,H,W,3] uint8
-    finally:
-        shutil.rmtree(fdir, ignore_errors=True)
+    poses = result.camera_poses.astype(np.float32)   # [N,4,4] c2w
+    wp = result.world_points                         # [M,H,W,3] world
+    conf = result.confidence                         # [M,H,W] or None
+    col = result.colors                              # [M,H,W,3] uint8 (same frames the model saw)
+    dense = list(range(len(poses)))
 
     cams = poses[:, :3, 3].astype(np.float32)
     M, H, W = wp.shape[0], wp.shape[1], wp.shape[2]

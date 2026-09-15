@@ -7,26 +7,37 @@
 #   AX650 chip: -v /soc:/soc:ro --privileged
 # Models come from https://huggingface.co/AXERA-TECH/ABot-Recon, mounted at /models.
 #
-# build args: TARGET=axcl|ax650   (sets ABOT_DEVICE); PYAXENGINE_URL (wheel)
+# build args: TARGET=axcl|ax650 (sets ABOT_DEVICE); PYAXENGINE_URL / PYAXVIDEO_BASE (wheel locations);
+#             APT_MIRROR / PIP_INDEX_URL (optional mirrors for slow networks, e.g. mirrors.tuna.tsinghua.edu.cn)
 ARG PY=3.12
-FROM python:${PY}-slim-bookworm AS build
+FROM python:${PY}-slim-trixie AS build
+ARG TARGETARCH
 ARG PYAXENGINE_URL=https://github.com/AXERA-TECH/pyaxengine/releases/download/0.1.3.rc3/axengine-0.1.3-py3-none-any.whl
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev curl ca-certificates \
+ARG PYAXVIDEO_BASE=https://github.com/AXERA-TECH/ax-video-sdk/releases/download/pyaxvideo-latest
+ARG APT_MIRROR=""
+ARG PIP_INDEX_URL=https://pypi.org/simple
+RUN if [ -n "$APT_MIRROR" ]; then sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources; fi \
+    && apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && cd /tmp && curl -fsSLO "$PYAXENGINE_URL" && pip install --no-cache-dir /tmp/axengine-*.whl && cd /app
+    && cd /tmp && curl -fsSLO --retry 5 --retry-delay 5 --retry-all-errors "$PYAXENGINE_URL" && pip install --no-cache-dir /tmp/axengine-*.whl \
+    && ARCH=$([ "$TARGETARCH" = "arm64" ] && echo aarch64 || echo x86_64) \
+    && curl -fsSLO --retry 5 --retry-delay 5 --retry-all-errors "$PYAXVIDEO_BASE/pyaxvideo-0.1.1-py3-none-linux_${ARCH}.whl" \
+    && pip install --no-cache-dir --no-deps /tmp/pyaxvideo-*.whl && cd /app
 COPY abot_axera ./abot_axera
 # compile the resize kernel now so the runtime image needs no compiler
 RUN python -c "import abot_axera.preprocess as p; assert p._load_c() is not None, 'kernel build failed'" \
     && ls abot_axera/_build
 
-FROM python:${PY}-slim-bookworm
+FROM python:${PY}-slim-trixie
 ARG PY
 ARG TARGET=axcl
+ARG APT_MIRROR=""
 # libgomp: OpenMP runtime for the resize kernel
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
+RUN if [ -n "$APT_MIRROR" ]; then sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources; fi \
+    && apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/lib/python${PY}/site-packages /usr/local/lib/python${PY}/site-packages
 COPY --from=build /usr/local/bin /usr/local/bin
 WORKDIR /app

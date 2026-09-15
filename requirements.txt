@@ -1,7 +1,8 @@
 # ABot-Recon on Axera NPU — Python dependencies (verified with Python 3.12 on the AXCL host).
 #
 # NOT on pip: the Axera runtime (libaxcl_rt for PCIe cards, libax_engine/libax_sys on-chip) and the
-# pyaxengine package (`axengine`) come from the Axera SDK.
+# pyaxengine package (`axengine`) come from the Axera SDK. Optional: pyaxvideo (ax-video-sdk wheel,
+# https://github.com/AXERA-TECH/ax-video-sdk/releases/tag/pyaxvideo-latest) for hardware video decode.
 # No torch / torchvision / open3d / safetensors / onnxruntime: the host side (preprocessing, pose
 # head, point clouds) is plain numpy, so the whole thing runs on a bare AX650 board too.
 
