@@ -227,7 +227,7 @@ function fmtJob(id,j){
     acts.push(`<button class="ghost" onclick="view3d('${id}')">在3D查看</button>`);
     const P=j.products||[];
     if(P.includes("floorplan.png"))acts.push(`<button class="ghost" onclick="showFloor('${id}')">俯视图</button>`);
-    for(const f of ["cloud.ply","mesh.ply","place_map.nvclip"])
+    for(const f of ["splats.ply","cloud.ply"])
       if(P.includes(f))acts.push(`<a href="/jobs/${id}/${f}" download>${f}</a>`);
   }
   if(j.video)acts.push(`<button class="ghost" onclick="toggleVideo('${id}')">${openPlayers.has(id)?"收起视频":"视频"}</button>`);
@@ -235,7 +235,7 @@ function fmtJob(id,j){
   acts.push(`<button class="ghost danger" onclick="delJob('${id}')">删除</button>`);
   let info, extra="";
   if(st==="done"){
-    info=`${m.fps||j.fps||"?"}fps · ${m.frames||"?"} 帧 · ${m.cloud_points||"?"} 点${m.ceiling_cut?" · 去顶":""} · ${m.total_s||"?"}s`;
+    info=`${m.fps||j.fps||"?"}fps · ${m.frames||"?"} 帧 · ${m.cloud_points||"?"} 点${m.splats?` · ${m.splats} 高斯`:""}${m.ceiling_cut?" · 去顶":""} · ${m.total_s||"?"}s`;
   }else if(st==="error"){
     info=(j.error||"").slice(0,80);
   }else{

@@ -39,7 +39,8 @@ app = FastAPI(title="ABot-Recon 建图服务")
 _jobs = {}                 # id -> {status, out, meta, ...}
 _viser = {"server": None, "status_md": None, "jobs_dd": None, "show_traj": None,
           "traj_handle": None, "cloud_handle": None, "psize_mult": None, "base_psize": None,
-          "cloud_pts": None, "cloud_col": None, "cloud_zspan": None, "ceil_slider": None}
+          "cloud_pts": None, "cloud_col": None, "cloud_zspan": None, "ceil_slider": None,
+          "splats": None, "splat_handle": None, "mode": None}
 
 
 class ModelManager:
@@ -404,22 +405,29 @@ def api_info():
 
 # ---------------- viser web (3D + control panel) ----------------
 def _redraw_cloud():
-    """(Re)draw /cloud from the stored points, applying the live ceiling-height filter. Called
-    on load and whenever the '保留高度' slider moves — no re-run, just re-filter + re-upload."""
+    """(Re)draw the scene from the stored points / splats, applying the live ceiling-height filter.
+    Called on load and whenever a viewer control changes — no re-run, just re-filter + re-upload."""
     srv = _viser["server"]; pts = _viser.get("cloud_pts"); col = _viser.get("cloud_col")
     if srv is None or pts is None or not len(pts):
         return
     keep = float(_viser["ceil_slider"].value) if _viser.get("ceil_slider") is not None else 1.0
-    if keep < 0.999:
-        lo, hi = _viser["cloud_zspan"]
-        m = pts[:, 2] <= lo + keep * (hi - lo)          # z is up (recentered) → cut the top
-        P, C = pts[m], col[m]
-    else:
-        P, C = pts, col
+    lo, hi = _viser["cloud_zspan"]; zcut = lo + keep * (hi - lo)
+    mode = _viser["mode"].value if _viser.get("mode") is not None else "高斯"
+    sp = _viser.get("splats")
+    if mode == "高斯" and sp is not None:
+        cen, rgb, op, cov = sp
+        m = cen[:, 2] <= zcut if keep < 0.999 else slice(None)
+        if _viser.get("cloud_handle") is not None:
+            _viser["cloud_handle"].remove(); _viser["cloud_handle"] = None
+        _viser["splat_handle"] = srv.scene.add_gaussian_splats("/splats", cen[m], cov[m], rgb[m], op[m])
+        return
+    if _viser.get("splat_handle") is not None:
+        _viser["splat_handle"].remove(); _viser["splat_handle"] = None
+    m = pts[:, 2] <= zcut if keep < 0.999 else slice(None)
     base = _viser.get("base_psize") or 0.01
     mult = float(_viser["psize_mult"].value) if _viser.get("psize_mult") is not None else 1.0
     _viser["cloud_handle"] = srv.scene.add_point_cloud(
-        "/cloud", points=P, colors=C, point_size=base * mult, point_shape="circle")
+        "/cloud", points=pts[m], colors=col[m], point_size=base * mult, point_shape="circle")
 
 
 def _load_viser_cloud(job_id):
@@ -458,12 +466,21 @@ def _load_viser_cloud(job_id):
 
     _viser["cloud_pts"] = pts
     _viser["cloud_col"] = col
+    _viser["splats"] = None
+    sply = os.path.join(d, "splats.ply")
+    if os.path.exists(sply):
+        try:
+            from abot_axera.splats import read_splat_ply
+            cen, rgb, op, cov = read_splat_ply(sply)
+            _viser["splats"] = (cen - c if len(pts) else cen, rgb, op, cov)
+        except Exception as e:
+            print("splats load skipped:", e)
     _viser["cloud_zspan"] = ((float(np.percentile(pts[:, 2], 1)), float(np.percentile(pts[:, 2], 99)))
                              if len(pts) else (0.0, 1.0))
     _viser["base_psize"] = (float(np.ptp(pts, 0).mean()) / 400) if len(pts) else 0.01
 
-    srv.scene.reset()
-    _redraw_cloud()                                    # draws /cloud with current ceiling + point size
+    srv.scene.reset(); _viser["cloud_handle"] = None; _viser["splat_handle"] = None
+    _redraw_cloud()                                    # splats (default) or points, with current ceiling filter
     if cams is not None:
         th = srv.scene.add_spline_catmull_rom("/trajectory", positions=cams,
                                               color=(45, 212, 191), line_width=3.0)
@@ -479,6 +496,13 @@ def _build_viser():
     srv = viser.ViserServer(host="0.0.0.0", port=int(os.environ.get("VISER_PORT", "8080")))
     _viser["server"] = srv
     srv.scene.set_up_direction("+z")                # room is z-up → natural orbit / reset view
+
+    md = srv.gui.add_dropdown("显示方式", ("高斯", "点云"), initial_value="高斯")
+    _viser["mode"] = md
+
+    @md.on_update
+    def _(_ev):
+        _redraw_cloud()
 
     cb = srv.gui.add_checkbox("显示相机轨迹", True)
     _viser["show_traj"] = cb

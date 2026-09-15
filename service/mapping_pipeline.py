@@ -8,6 +8,7 @@
   recon.npz     对齐后的相机中心 cams[N,3] + 原始 poses[N,4,4](网页轨迹用)
   cloud.ply     真实 RGB 点云(置信过滤 + 地面对齐 + 可选去天花板)
   cloud_viz.ply 按时间上色点云(备用)
+  splats.ply    高斯 splat(3DGS PLY 格式,免训练,由点图法线/间距生成;网页 3D 默认用它)
   floorplan.png 俯视户型图(相机轨迹 PCA 基底 + magma hexbin)
   view_ob.png   3D 斜视(真实 RGB, 立正)
   view_top.png  俯视时间色
@@ -82,6 +83,7 @@ def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
     from PIL import Image
     from abot_axera.preprocess import preprocess_image
     from abot_axera.pointcloud import VoxelGrid, write_ply
+    from abot_axera.splats import frame_geometry, build_gaussians, write_splat_ply
     prog = _progress()
     os.makedirs(out_dir, exist_ok=True)
     t0 = time.time()
@@ -125,6 +127,8 @@ def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
     st = 2
     P = wp[:, ::st, ::st, :].reshape(-1, 3).astype(np.float32)
     C = (col[:, ::st, ::st, :].reshape(-1, 3).astype(np.float32) / 255.0).clip(0, 1)
+    NRM, SPC = frame_geometry(wp, cams, st)                       # surfel normals + spacing per sample
+    NRM = NRM.reshape(-1, 3); SPC = SPC.reshape(-1, 2)
     hh, ww = (H + st - 1) // st, (W + st - 1) // st
     T = np.repeat(np.arange(M, dtype=np.float32), hh * ww)
     F = conf[:, ::st, ::st].reshape(-1) if conf is not None else np.ones(len(P), np.float32)
@@ -133,14 +137,14 @@ def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
     if conf is not None:
         pos = F > 0
         m &= pos & (F >= np.percentile(F[pos], 45))     # conf gate (45th pctile)
-    P, C, T = P[m], C[m], T[m]
+    P, C, T, F, NRM, SPC = P[m], C[m], T[m], F[m], NRM[m], SPC[m]
     meta["points_raw"] = int(len(P))
 
     # gravity-align to the floor basis, then orient +z = up via the camera down-axis (c2w col1),
     # rotating 180° about x if inverted (proper rotation) so the room stands upright everywhere.
-    Bg = _grav_basis(cams); P = (P @ Bg).astype(np.float32); cams = cams @ Bg
+    Bg = _grav_basis(cams); P = (P @ Bg).astype(np.float32); cams = cams @ Bg; NRM = (NRM @ Bg).astype(np.float32)
     if float(poses[:, :3, 1].mean(0) @ Bg[:, 2]) > 0:
-        P[:, 1] *= -1; P[:, 2] *= -1; cams[:, 1] *= -1; cams[:, 2] *= -1
+        P[:, 1] *= -1; P[:, 2] *= -1; cams[:, 1] *= -1; cams[:, 2] *= -1; NRM[:, 1] *= -1; NRM[:, 2] *= -1
 
     # drop far global-drift geometry: keep only points within the WALKED area (camera-trajectory
     # xy bbox + margin). ABot's sequential composition can fling a chunk of geometry far from the
@@ -152,7 +156,7 @@ def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
         inb = ((P[:, 0] > cxy0[0] - mrg) & (P[:, 0] < cxy1[0] + mrg) &
                (P[:, 1] > cxy0[1] - mrg) & (P[:, 1] < cxy1[1] + mrg))
         meta["walked_area_kept"] = [int(inb.sum()), int(len(inb))]
-        P, C, T = P[inb], C[inb], T[inb]
+        P, C, T, F, NRM, SPC = P[inb], C[inb], T[inb], F[inb], NRM[inb], SPC[inb]
 
     # optional ceiling removal: keep a fraction of the floor→ceiling span from the floor (+z up)
     if ceiling_cut and len(P):
@@ -160,7 +164,7 @@ def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
         keep = up_h <= lo + float(ceiling_keep) * (hi - lo)
         meta["ceiling_cut"] = {"keep_frac": round(float(ceiling_keep), 2),
                                "kept": int(keep.sum()), "of": int(len(keep))}
-        P, C, T = P[keep], C[keep], T[keep]
+        P, C, T, F, NRM, SPC = P[keep], C[keep], T[keep], F[keep], NRM[keep], SPC[keep]
 
     np.savez_compressed(os.path.join(out_dir, "recon.npz"),
                         cams=cams.astype(np.float32), poses=poses)
@@ -178,6 +182,17 @@ def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
     write_ply(os.path.join(out_dir, "cloud.ply"), Pv, grid.mean(C))
     write_ply(os.path.join(out_dir, "cloud_viz.ply"), Pv, grid.mean(Ctime))
     meta["cloud_points"] = int(len(Pv))
+
+    # ---- Gaussian splats (surfels): same cloud, coarser grid if it would exceed MAP_SPLATS_MAX ----
+    smax = int(os.environ.get("MAP_SPLATS_MAX", "1500000"))
+    gs, vox_s = grid, vox
+    for _ in range(4):                                          # points sit on surfaces: count ~ 1/vox^2
+        if len(gs) <= smax:
+            break
+        vox_s *= float(np.sqrt(len(gs) / smax)) * 1.05; gs = VoxelGrid(P, vox_s)
+    g = build_gaussians(gs.mean(P), gs.mean(C), gs.mean(NRM), gs.mean(SPC), 0.95, voxel=vox_s)
+    write_splat_ply(os.path.join(out_dir, "splats.ply"), g)
+    meta["splats"] = int(len(g["centers"]))
 
     _render(out_dir, P, C, Ctime, cams, meta)
 
