@@ -69,6 +69,7 @@ tmux new-session -d -s abot "bash start_service.sh > service_run.log 2>&1"   # �
 | `MAP_FPS` | `8` | 默认抽帧率(网页可改,1–15) |
 | `MAP_IDLE_UNLOAD` | `100000` | 空闲多少秒卸载模型 |
 | `MAP_SPLATS_MAX` | `1500000` | splats.ply 最多多少个高斯(超出则加粗体素) |
+| `MAP_SPLATS_VIEW` | `400000` | 网页 3D 最多渲染多少个高斯(超出随机抽样并放大) |
 
 ### API
 

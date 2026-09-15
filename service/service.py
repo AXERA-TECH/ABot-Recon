@@ -416,10 +416,19 @@ def _redraw_cloud():
     sp = _viser.get("splats")
     if mode == "高斯" and sp is not None:
         cen, rgb, op, cov = sp
-        m = cen[:, 2] <= zcut if keep < 0.999 else slice(None)
+        m = cen[:, 2] <= zcut if keep < 0.999 else np.ones(len(cen), bool)
+        # browser budget: random subset, splats enlarged by the density ratio so surfaces stay closed
+        vmax = int(os.environ.get("MAP_SPLATS_VIEW", "400000"))
+        idx = np.flatnonzero(m)
+        if len(idx) > vmax:
+            idx = np.random.default_rng(0).choice(idx, vmax, replace=False)
+            k = float(len(m.nonzero()[0]) / vmax)
+            covs = cov[idx] * k                 # sigma * sqrt(k) in every axis
+        else:
+            covs = cov[idx]
         if _viser.get("cloud_handle") is not None:
             _viser["cloud_handle"].remove(); _viser["cloud_handle"] = None
-        _viser["splat_handle"] = srv.scene.add_gaussian_splats("/splats", cen[m], cov[m], rgb[m], op[m])
+        _viser["splat_handle"] = srv.scene.add_gaussian_splats("/splats", cen[idx], covs, rgb[idx], op[idx])
         return
     if _viser.get("splat_handle") is not None:
         _viser["splat_handle"].remove(); _viser["splat_handle"] = None
