@@ -98,22 +98,26 @@ GET  /status              模型状态;POST /models/load|unload
 | KV cache 缓冲(4 × 588 MB fp32) | 2243 MiB |
 | 合计(常驻) | 5341 MiB |
 
-AXCL 卡 CMM 为 7040 MiB。片上运行需同样约 5.3 GB CMM,板子 CMM 预留需 ≥ 6 GB。
+AXCL 卡 CMM 为 7040 MiB。片上运行实测 CMM 5324 MiB(AX650 板,CMM 预留 10 GB),板子 CMM 预留需 ≥ 6 GB。
 
 ### 耗时(AX650N)
 
-| 环节 | AXCL 卡 | AX650 板 |
+| 环节 | AXCL 卡(x86 主机) | AX650 板片上 |
 |---|---|---|
+| 模型加载 | 23 s | 2.2 s |
 | encoder | 0.19 s | 0.19 s |
-| decoder_step | 2.63 s | 未测 |
+| decoder_step | 2.63 s | 2.6 s |
 | heads | 0.13 s | 0.13 s |
-| 每帧合计(含预处理、位姿头) | 3.0 s | — |
-| 模型加载 | 23 s | — |
-| 预处理(JPEG 解码 + 缩放) | ~5 ms | ~45 ms |
-| 位姿头 | ~10 ms | ~64 ms |
-| 后处理(346 帧:位姿、点云、渲染) | ~40 s | — |
+| NPU 每帧 | 2.99 s | 2.92 s |
+| 预处理(pyaxvideo 硬解 + IVPS,与推理并行) | 解码 5 ms + 下卡 9 ms | 解码 3 ms + 7 ms |
+| 预处理(cv2 软解 + 缩放) | ~5 ms | ~50 ms |
+| 位姿头 | ~10 ms | ~87 ms |
+| 每帧合计 | 3.0 s | 3.0 s |
+| 346 帧任务:推理 | 1037 s | 1136 s |
+| 346 帧任务:后处理(位姿、点云、splat、渲染) | ~40 s | ~300 s |
+| 346 帧任务:总时 | 1058 s | 1433 s |
 
-估算:`总时长 ≈ 模型加载 + 抽帧 + N × 3.0 s + 0.13 s × N`,N ≈ 视频秒数 × 抽帧率。例:346 帧(43 s 视频,8 fps)任务 1084 s。`ABOT_RUNNER=pyaxengine` 时每帧约 9.5 s。
+估算:`总时长 ≈ 模型加载 + N × 3.0 s + 后处理`,N ≈ 视频秒数 × 抽帧率;后处理卡上约 0.12 s × N,板上约 0.9 s × N。`ABOT_RUNNER=pyaxengine` 时每帧约 9.5 s。板端内存:346 帧任务峰值约 3.3 GB(6 GB 内存的板子可跑)。
 
 ## Docker
 
@@ -123,7 +127,7 @@ AXCL 卡 CMM 为 7040 MiB。片上运行需同样约 5.3 GB CMM,板子 CMM 预�
 |---|---|---|
 | `abot-recon-axcl-x86_64.tar` / `.tgz` | linux/amd64 | x86 主机 + AXCL 卡 |
 | `abot-recon-axcl-aarch64.tar` / `.tgz` | linux/arm64 | aarch64 主机 + AXCL 卡 |
-| `abot-recon-ax650-aarch64.tar` / `.tgz` | linux/arm64 | AX650 板片上 |
+| `abot-recon-ax650-aarch64.tar` / `.tgz` | linux/arm64 | AX650 板片上(Ubuntu 22.04 基底,与板子 BSP 同 glibc) |
 
 镜像内不含 Axera 运行时,宿主机需已安装 AXCL 驱动(或板子 BSP),运行时从宿主机映射进容器;`/models` 目录按 HuggingFace 仓库原样布局(含 `host_pose_head/`)。
 

@@ -22,12 +22,15 @@ jobs:
           - name: axcl-x86_64
             platform: linux/amd64
             target: axcl
+            dockerfile: docker/Dockerfile
           - name: axcl-aarch64
             platform: linux/arm64
             target: axcl
+            dockerfile: docker/Dockerfile
           - name: ax650-aarch64
             platform: linux/arm64
             target: ax650
+            dockerfile: docker/Dockerfile.ax650
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -36,7 +39,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platform }}
           build-args: TARGET=${{ matrix.target }}
           tags: abot-recon:${{ matrix.name }}
