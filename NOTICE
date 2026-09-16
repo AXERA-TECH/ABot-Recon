@@ -1,0 +1,34 @@
+ABot-Recon on Axera NPU
+Copyright 2026 AXERA-TECH
+
+This product is an adaptation of ABot-Recon for Axera NPUs (AXCL cards and
+on-chip AX650). It includes code derived from the ABot-Recon project and
+redistributes model files converted from the released ABot-Recon weights.
+
+Upstream project
+----------------
+ABot-Recon
+Copyright 2025 the authors
+Copyright 2026 ABot-Recon Authors
+https://github.com/amap-cvlab/ABot-Recon
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software developed by the ABot-Recon authors and
+third-party components identified in THIRD_PARTY_NOTICES.md. Those components
+remain subject to their respective copyright notices and license terms.
+
+Derived code in this repository
+-------------------------------
+abot_axera/pose_head.py       numpy port of the released AdjacentPoseHead
+abot_axera/backend.py         inference assembly following the upstream
+                              streaming chain and output contract
+abot_axera/preprocess.py      frame preprocessing matching the upstream
+                              width-lock resize / crop / pad
+
+Model files
+-----------
+The .axmodel files and the host pose-head weights distributed with this project
+are converted from the released ABot-Recon weights and remain licensed under
+CC BY-NC 4.0 (non-commercial). See MODEL_LICENSE.md and
+MODEL_USAGE_GUIDELINES.md. Those weights are themselves derived from Pi3;
+the attribution to Pi3 and ABot-Recon must be preserved on redistribution.

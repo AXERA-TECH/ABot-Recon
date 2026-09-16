@@ -1,6 +1,8 @@
 # ABot-Recon on Axera NPU
 
-[ABot-Recon](https://huggingface.co/acvlab/ABot-Recon) 在 Axera NPU 上的推理实现:输入视频,输出相机位姿、世界坐标点云和置信度;附带建图服务(网页上传视频 → 点云 / 高斯 splat / 户型俯视图 / 3D 查看)。
+[ABot-Recon](https://github.com/amap-cvlab/ABot-Recon) 在 Axera NPU 上的推理实现:输入视频,输出相机位姿、世界坐标点云和置信度;附带建图服务(网页上传视频 → 点云 / 高斯 splat / 户型俯视图 / 3D 查看)。
+
+本项目是对上游 ABot-Recon 的硬件适配,模型与算法均来自原作者;上游项目主页 <https://amap-cvlab.github.io/ABot-Recon-html/>。许可见文末。
 
 支持两种运行形态:
 
@@ -171,6 +173,19 @@ python scripts/onchip_check.py --make-ref ref.npz                               
 python3 scripts/onchip_check.py /path/to/axmodels ref.npz                          # 板上比对 encoder + heads
 bash scripts/http_smoke.sh video.mp4                                               # 服务端到端
 ```
+
+## 许可与致谢
+
+本项目改编自 [amap-cvlab/ABot-Recon](https://github.com/amap-cvlab/ABot-Recon)(项目主页 <https://amap-cvlab.github.io/ABot-Recon-html/>),算法、模型与训练均为原作者的工作,在此致谢。
+
+| 内容 | 许可 |
+|---|---|
+| 代码(本仓库 + 上游派生部分) | Apache License 2.0,见 [LICENSE](LICENSE)、[NOTICE](NOTICE) |
+| 模型权重(含转换后的 `.axmodel` 与位姿头) | **CC BY-NC 4.0,仅限非商业用途**,见 [MODEL_LICENSE.md](MODEL_LICENSE.md) |
+| 模型使用边界 | [MODEL_USAGE_GUIDELINES.md](MODEL_USAGE_GUIDELINES.md) / [中文](MODEL_USAGE_GUIDELINES_ZH.md) |
+| 第三方组件(Pi3、cuRoPE2D、DINOv2 等) | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) |
+
+上游权重派生自 [Pi3](https://github.com/yyfz/Pi3),转换后的模型同样受 CC BY-NC 4.0 约束,再分发须保留对 Pi3 与 ABot-Recon 的署名。商业使用需另行获得相关权利人的书面授权。
 
 ## 已知限制
 
