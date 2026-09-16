@@ -30,10 +30,10 @@ scripts/                    验证脚本
 
 ## 模型与依赖
 
-模型文件从 HuggingFace 下载:**https://huggingface.co/AXERA-TECH/ABot-Recon**
+模型文件从 HuggingFace 下载:**https://huggingface.co/AXERA-TECH/ABot-Recon-Axera**
 
 ```bash
-hf download AXERA-TECH/ABot-Recon --local-dir /path/to/ABot-Recon
+hf download AXERA-TECH/ABot-Recon-Axera --local-dir /path/to/ABot-Recon
 ```
 
 | 内容 | 环境变量 | 说明 |
@@ -128,7 +128,7 @@ AXCL 卡 CMM 为 7040 MiB。片上运行实测 CMM 5324 MiB(AX650 板,CMM 预留
 
 ## Docker
 
-每次推送 main 后 CI 自动构建三个镜像,放在固定的 release tag [`docker-latest`](https://github.com/AXERA-TECH/ABot-Recon/releases/tag/docker-latest)(每次覆盖),同时提供 `.tar` 和 `.tgz`:
+每次推送 main 后 CI 自动构建三个镜像,放在固定的 release tag [`docker-latest`](https://github.com/AXERA-TECH/ABot-Recon-Axera/releases/tag/docker-latest)(每次覆盖),同时提供 `.tar` 和 `.tgz`:
 
 | 文件 | 平台 | 用途 |
 |---|---|---|
@@ -143,7 +143,7 @@ AXCL 卡 CMM 为 7040 MiB。片上运行实测 CMM 5324 MiB(AX650 板,CMM 预留
 docker load -i abot-recon-axcl-x86_64.tgz          # .tar 同样可以
 
 # 模型
-hf download AXERA-TECH/ABot-Recon --local-dir /path/to/ABot-Recon
+hf download AXERA-TECH/ABot-Recon-Axera --local-dir /path/to/ABot-Recon
 
 # AXCL 卡(x86_64 / aarch64 主机)
 docker run -d --name abot -p 8011:8011 -p 8082:8082 \

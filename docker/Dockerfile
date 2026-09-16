@@ -5,7 +5,7 @@
 #   AXCL card : -v /usr/lib/axcl:/usr/lib/axcl:ro -v /usr/bin/axcl:/usr/bin/axcl:ro
 #               --device /dev/axcl_host --device /dev/ax_mmb_dev
 #   AX650 chip: -v /soc:/soc:ro --privileged
-# Models come from https://huggingface.co/AXERA-TECH/ABot-Recon, mounted at /models.
+# Models come from https://huggingface.co/AXERA-TECH/ABot-Recon-Axera, mounted at /models.
 #
 # build args: TARGET=axcl|ax650 (sets ABOT_DEVICE); PYAXENGINE_URL / PYAXVIDEO_BASE (wheel locations);
 #             APT_MIRROR / PIP_INDEX_URL (optional mirrors for slow networks, e.g. mirrors.tuna.tsinghua.edu.cn)
