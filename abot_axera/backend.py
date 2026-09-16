@@ -30,6 +30,10 @@ from .pose_head import AdjacentPoseHead
 KV_SHAPE = (1, 18, 16, 11, 725, 64)
 
 
+class JobCancelled(RuntimeError):
+    """Raised inside infer() when the caller's should_stop() turns true."""
+
+
 def make_runner(model_dir: str, device_id: int = 0, suffix: str = "_kitti02",
                 kind: str | None = None, device: str | None = None):
     """kind: native (default) | pyaxengine.  device (native only): auto | axcl | ax650."""
@@ -99,7 +103,8 @@ class AbotRecon:
 
     def infer(self, frames, *, output_local_points: bool = False, output_world_points: bool = True,
               output_confidence: bool = True, output_colors: bool = False, dense_output_indices=None,
-              total: int | None = None, loop_closure: bool = False, **_ignored) -> ReconResult:
+              total: int | None = None, loop_closure: bool = False, should_stop=None,
+              **_ignored) -> ReconResult:
         """frames: image paths, or an iterable of (chw float32 [3,280,504], rgb uint8 [280,504,3]) pairs
         (see abot_axera.video). `total` gives the frame count for progress when frames is a generator."""
         if loop_closure:
@@ -123,6 +128,8 @@ class AbotRecon:
         print(f"[abot] infer start: {n} frames via {self.provider}", flush=True)
         for fi, item in enumerate(self._iter_frames(frames)):
             chw, rgb = item
+            if should_stop is not None and should_stop():
+                raise JobCancelled(f"cancelled after {fi} frames")
             t0 = time.time()
             heads, state = step(chw[None], fi, state)
             poses.append(self.pose.step(heads["camera_features"][0]))

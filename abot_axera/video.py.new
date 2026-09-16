@@ -20,8 +20,8 @@ Environment
                         ivps  straight to the target size | host  full-res frame to the host
   ABOT_AX_RANGE         tv (default) expand 16..235 -> 0..255 after IVPS' full-range conversion
   ABOT_AX_FMT           format name passed to pyaxvideo convert() ("bgr" returns RGB in 0.1.1)
-  ABOT_AX_TIMEOUT       seconds to wait for the first frame (default 90)
-  ABOT_AX_FRAME_TIMEOUT seconds to wait for each further frame (default 45)
+  ABOT_AX_TIMEOUT       seconds to wait for the first frame (default 40)
+  ABOT_AX_FRAME_TIMEOUT seconds to wait for each further frame (default 30)
 """
 from __future__ import annotations
 
@@ -158,6 +158,7 @@ def _child_decode(cfg: dict) -> int:
 
 _axv_lock = threading.Lock()
 _axv_state = {"ok": None}
+_no_hw: set[str] = set()      # videos the hardware decoder could not handle in this process
 
 
 def ax_available(device_id: int = 0) -> bool:
@@ -193,8 +194,8 @@ class AxVideoSource:
         self.resize = (resize or os.environ.get("ABOT_AX_RESIZE", "ivps2x")).lower()
         self.fmt = os.environ.get("ABOT_AX_FMT", "bgr")            # 0.1.1 swaps rgb/bgr
         self.range_fix = os.environ.get("ABOT_AX_RANGE", "tv").lower()
-        self.first_timeout = float(os.environ.get("ABOT_AX_TIMEOUT", "90"))
-        self.frame_timeout = float(os.environ.get("ABOT_AX_FRAME_TIMEOUT", "45"))
+        self.first_timeout = float(os.environ.get("ABOT_AX_TIMEOUT", "40"))
+        self.frame_timeout = float(os.environ.get("ABOT_AX_FRAME_TIMEOUT", "30"))
         w, h, src_fps, n = probe(path)
         self.w, self.h = w, h
         self.interval = sample_interval(src_fps, fps)
@@ -287,7 +288,9 @@ class AutoSource:
 
     def __init__(self, path: str, fps: int, device_id: int = 0):
         self.cv = Cv2Source(path, fps)
-        self.ax = AxVideoSource(path, fps, device_id) if ax_available(device_id) else None
+        self.path = os.path.abspath(path)
+        usable = ax_available(device_id) and self.path not in _no_hw
+        self.ax = AxVideoSource(path, fps, device_id) if usable else None
         self.interval, self.total = self.cv.interval, self.cv.total
         self.name = "ax" if self.ax is not None else "cv2"
 
@@ -302,6 +305,7 @@ class AutoSource:
             except DecoderUnavailable as e:
                 if n:
                     raise
+                _no_hw.add(self.path)          # don't pay the timeout again for this video
                 print(f"[video] {e}; falling back to cv2", flush=True)
                 self.name = "cv2"
         yield from self.cv

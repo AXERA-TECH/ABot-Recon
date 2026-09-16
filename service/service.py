@@ -54,6 +54,7 @@ class ModelManager:
         self.progress = 0            # 0..100 during load
         self.last_used = 0.0
         self.busy = False            # a job is actively processing (no idle countdown)
+        self.active_job = None       # id of the job that currently holds the model
         self.err = None
 
     # ---- internals (assume lock held) ----
@@ -143,6 +144,9 @@ def _idle_watch():
             print("idle-watch err:", e)
 
 
+_cancelled = set()                 # job ids whose worker should stop at the next frame
+
+
 def _worker(job_id, video_path, mask_sky, model_name, fps, ceiling_cut, ceiling_keep):
     from mapping_pipeline import run
     out = os.path.join(DATA, job_id)
@@ -152,19 +156,30 @@ def _worker(job_id, video_path, mask_sky, model_name, fps, ceiling_cut, ceiling_
         with mgr.lock:                          # serialize the NPU + hold model during job
             print(f"[job] {job_id} got model lock; ensuring model loaded…", flush=True)
             mgr._ensure_locked(model_name)      # lazy-load if needed
-            mgr.busy = True; mgr.last_used = time.time()
+            mgr.busy = True; mgr.active_job = job_id; mgr.last_used = time.time()
             try:
                 # ABot run: world_points + c2w poses → dense RGB cloud / floorplan / 3D.
                 meta = run(video_path, out, fps=fps, ceiling_cut=ceiling_cut,
-                           ceiling_keep=ceiling_keep, model=mgr.model)
+                           ceiling_keep=ceiling_keep, model=mgr.model,
+                           should_stop=lambda: job_id in _cancelled)
             finally:
-                mgr.busy = False; mgr.last_used = time.time()
-        _jobs[job_id].update(status="done", meta=meta, products=sorted(os.listdir(out)))
+                mgr.busy = False; mgr.active_job = None; mgr.last_used = time.time()
+        if job_id in _jobs:
+            _jobs[job_id].update(status="done", meta=meta, products=sorted(os.listdir(out)))
         print(f"[job] {job_id} done: {meta.get('frames','?')} 帧 {meta.get('cloud_points','?')} 点", flush=True)
     except Exception as e:
+        cancelled = job_id in _cancelled
         tb = traceback.format_exc()
-        _jobs[job_id].update(status="error", error=(str(e) or repr(e)), traceback=tb[-2000:])
-        print(f"[job] {job_id} FAILED:\n{tb}", flush=True)
+        if job_id in _jobs:
+            _jobs[job_id].update(status="cancelled" if cancelled else "error",
+                                 error=(str(e) or repr(e)), traceback=tb[-2000:])
+        print(f"[job] {job_id} {'CANCELLED' if cancelled else 'FAILED'}: {e}", flush=True)
+        if not cancelled:
+            print(tb, flush=True)
+    finally:
+        _cancelled.discard(job_id)
+        from abot_axera import progress as _prog
+        _prog.clear()
 
 
 # ---------------- job API ----------------
@@ -249,7 +264,7 @@ def _submit_job(filename, mask_sky, model_name, src, fps, ceiling_cut=False, cei
     _link_video(store_path, vpath)
     json.dump({"name": os.path.basename(vpath), "sha256": sha, "size": size},
               open(os.path.join(out, "video.json"), "w"))
-    _jobs[job_id] = {"status": "queued", "out": out, "t": time.time(),
+    _jobs[job_id] = {"id": job_id, "status": "queued", "out": out, "t": time.time(),
                      "video": os.path.basename(vpath), "vpath": vpath, "mask_sky": mask_sky,
                      "model": model_name, "fps": fps, "sha256": sha, "video_size": size,
                      "ceiling_cut": ceiling_cut, "ceiling_keep": ceiling_keep}
@@ -277,14 +292,19 @@ def _public(j):
     out = {k: v for k, v in j.items() if k not in ("out", "vpath")}
     if j.get("sha256"):
         out["same_as"] = [x for x in _jobs_with_sha(j["sha256"]) if _jobs[x] is not j]
-    if out.get("status") == "running":
+    jid = j.get("id")
+    if out.get("status") in ("running", "queued"):
         try:
             from abot_axera import progress as _prog
             p = _prog.get()
-            if p.get("phase"):
-                out["progress"] = p
         except Exception:
-            pass
+            p = {}
+        if p.get("phase") and mgr.active_job == jid:
+            out["progress"] = p
+        elif mgr.active_job not in (None, jid):
+            out["progress"] = {"phase": "queued"}          # another job holds the model
+        else:
+            out["progress"] = {"phase": "load"}            # loading the model / opening the video
     return out
 
 
@@ -336,10 +356,25 @@ def rerun(job_id: str):
     return {"job_id": new_id}
 
 
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    """Ask a queued/running job to stop; the worker aborts at the next frame and frees the NPU."""
+    if job_id not in _jobs:
+        raise HTTPException(404, "no such job")
+    if _jobs[job_id].get("status") in ("queued", "running"):
+        _cancelled.add(job_id)
+        _jobs[job_id]["cancelling"] = True
+        print(f"[job] {job_id} cancel requested", flush=True)
+    return {"cancelling": job_id}
+
+
 @app.delete("/jobs/{job_id}")
 def delete_job(job_id: str):
     if job_id not in _jobs:
         raise HTTPException(404, "no such job")
+    if _jobs[job_id].get("status") in ("queued", "running"):
+        _cancelled.add(job_id)                      # stop the worker before dropping the directory
+        print(f"[job] {job_id} cancel requested (delete)", flush=True)
     out = _jobs.pop(job_id).get("out")
     if out and os.path.isdir(out):
         shutil.rmtree(out, ignore_errors=True)
@@ -548,7 +583,7 @@ def _startup():
         if not os.path.isdir(d) or jid.startswith("_"):     # _videos/ is the content store, not a job
             continue
         has_cloud = os.path.exists(os.path.join(d, "cloud.ply"))
-        _jobs[jid] = {"status": "done" if has_cloud else "unknown", "out": d,
+        _jobs[jid] = {"id": jid, "status": "done" if has_cloud else "unknown", "out": d,
                       "t": os.path.getmtime(d), "products": sorted(os.listdir(d))}
         vids = [f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) and f.lower().endswith(VEXT)]
         if vids:

@@ -59,7 +59,7 @@ def _grav_basis(cams):
 
 
 def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
-        model=None, model_id=None, device=None):
+        model=None, model_id=None, device=None, should_stop=None):
     import numpy as np
     from abot_axera.video import open_video
     from abot_axera.pointcloud import VoxelGrid, write_ply
@@ -72,14 +72,15 @@ def run(video, out_dir, fps=8, ceiling_cut=False, ceiling_keep=0.85,
     # ---- frames: uniform fps sampling straight from the decoder (hardware when available) ----
     prog.clear(); prog.set_phase("extract")
     src = open_video(video, fps, device_id=int(os.environ.get("ABOT_DEVICE_ID", "0")))
-    meta["decoder"] = src.name
     print(f"[abot] decoder={src.name} interval={src.interval} ~{src.total} frames @ fps={fps} from {os.path.basename(video)}", flush=True)
 
     # ---- inference (reuse a pre-loaded model if given) ----
     if model is None:
         model = load_ready_model(model_id, True, device)
     t_inf = time.time()
-    result = model.infer(src, output_world_points=True, output_confidence=True, output_colors=True, total=src.total)
+    result = model.infer(src, output_world_points=True, output_confidence=True, output_colors=True,
+                         total=src.total, should_stop=should_stop)
+    meta["decoder"] = src.name                       # AutoSource may have fallen back to cv2
     meta["frames"] = int(result.camera_poses.shape[0]); meta["infer_s"] = round(time.time() - t_inf, 1)
 
     poses = result.camera_poses.astype(np.float32)   # [N,4,4] c2w

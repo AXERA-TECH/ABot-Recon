@@ -67,6 +67,7 @@
   .chip.queued,.chip.running{background:rgba(240,180,41,.16);color:var(--amber)}
   .chip.done{background:rgba(52,211,153,.16);color:var(--good)}
   .chip.error{background:rgba(248,113,113,.16);color:var(--bad)}
+  .chip.cancelled,.chip.unknown{background:rgba(139,151,167,.16);color:var(--muted)}
   .job .info{color:var(--muted);font-size:12px;margin-top:5px}
   .job .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px}
   .job .acts a,.job .acts button{font-size:12px;padding:5px 9px;border-radius:8px}
@@ -230,6 +231,7 @@ function fmtJob(id,j){
     for(const f of ["splats.ply","cloud.ply"])
       if(P.includes(f))acts.push(`<a href="/jobs/${id}/${f}" download>${f}</a>`);
   }
+  if(st==="queued"||st==="running")acts.push(`<button class="ghost danger" onclick="cancelJob('${id}')">停止</button>`);
   if(j.video)acts.push(`<button class="ghost" onclick="toggleVideo('${id}')">${openPlayers.has(id)?"收起视频":"视频"}</button>`);
   if(st==="done"||st==="error")acts.push(`<button class="ghost" onclick="rerun('${id}')">重跑</button>`);
   acts.push(`<button class="ghost danger" onclick="delJob('${id}')">删除</button>`);
@@ -253,10 +255,14 @@ function fmtJob(id,j){
     }else if(p.phase==="extract"){
       info=`抽帧中…(${j.fps||"?"}fps)${used}`;
       extra=`<div class="bar" style="margin-top:6px"><i style="width:100%;opacity:.35"></i></div>`;
+    }else if(p.phase==="queued"){
+      info=`排队中(前面有任务在跑)${used}`;
+      extra=`<div class="bar" style="margin-top:6px"><i style="width:100%;opacity:.25"></i></div>`;
     }else{
-      info=`处理中…(${j.fps||"?"}fps,加载模型中…)`;
+      info=`准备中…(${j.fps||"?"}fps,加载模型 / 打开视频)${used}`;
       extra=`<div class="bar" style="margin-top:6px"><i style="width:100%;opacity:.35"></i></div>`;
     }
+    if(j.cancelling)info="正在取消…";
   }
   const same=(j.same_as||[]).map(x=>x.slice(0,8)).join(", ");
   const dedup=same?` · <span title="同一视频只存一份,任务目录硬链接到共享存储">同视频: ${same}</span>`:"";
@@ -278,7 +284,7 @@ function toggleVideo(id){
   pollJobs();
 }
 function fmtDur(sec){sec=Math.max(0,Math.round(sec));const m=Math.floor(sec/60),s=sec%60;return m?`${m}分${String(s).padStart(2,"0")}秒`:`${s}秒`;}
-const LABEL2=s=>({queued:"排队",running:"处理中",done:"完成",error:"失败",unknown:"—"}[s]||s);
+const LABEL2=s=>({queued:"排队",running:"处理中",done:"完成",error:"失败",cancelled:"已停止",unknown:"—"}[s]||s);
 let lastJobs={};
 async function pollJobs(){
   try{const d=await jget("/jobs");lastJobs=d;
@@ -304,6 +310,8 @@ async function view3d(id){await jpost(`/jobs/${id}/view`);
   $("#viser").src=`http://${H}:__VISER_PORT__/?t=`+Date.now();toast("已载入 3D 视图");}
 function showFloor(id){selFloor=id;
   $("#floor").innerHTML=`<img src="/jobs/${id}/floorplan.png?t=${Date.now()}">`;}
+async function cancelJob(id){if(!confirm("停止这个任务?"))return;
+  await fetch(`/jobs/${id}/cancel`,{method:"POST"});toast("已请求停止");pollJobs();}
 async function rerun(id){const r=await fetch(`/jobs/${id}/rerun`,{method:"POST"});
   if(r.ok){toast("已重新提交");pollJobs();}else toast("重跑失败");}
 async function delJob(id){if(!confirm("删除该任务及其全部产物?"))return;

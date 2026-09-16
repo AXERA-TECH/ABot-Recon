@@ -54,6 +54,7 @@ tmux new-session -d -s abot "bash start_service.sh > service_run.log 2>&1"   # �
 - 网页流程:上传视频 → 选抽帧率 → 提交 → 进度条(帧 i/N、已用、预计剩余)→ 3D 查看(点云,可切换高斯 splat)/ 俯视图 / 下载 splats.ply、cloud.ply
 - 模型在首次任务时加载,空闲 `MAP_IDLE_UNLOAD` 秒后卸载
 - 任务卡片可直接播放原视频;同一视频只在 `jobs/_videos/` 存一份(按内容哈希),任务目录硬链接到它,删除任务后无引用的视频自动清除
+- 任务可随时「停止」;硬件解码在独立子进程里跑,卡住会被杀掉并自动退回 cv2,不会拖住整个服务
 
 ### 环境变量
 
@@ -62,7 +63,8 @@ tmux new-session -d -s abot "bash start_service.sh > service_run.log 2>&1"   # �
 | `ABOT_RUNNER` | `native` | `native` / `pyaxengine`(参考实现) |
 | `ABOT_DEVICE` | `auto` | `axcl` / `ax650` / `auto` |
 | `ABOT_DEVICE_ID` | `0` | AXCL 卡号(片上忽略) |
-| `ABOT_DECODER` | `auto` | 视频解码:`ax`(pyaxvideo 硬解,H.264/H.265)/ `cv2`;`auto` 优先硬解,不支持的编码自动退回 cv2 |
+| `ABOT_DECODER` | `auto` | 视频解码:`ax`(pyaxvideo 硬解,H.264/H.265)/ `cv2`;`auto` 优先硬解,不支持或卡住时自动退回 cv2 |
+| `ABOT_AX_TIMEOUT` / `ABOT_AX_FRAME_TIMEOUT` | `40` / `30` | 硬解等待首帧 / 后续每帧的秒数,超时即杀掉解码子进程 |
 | `ABOT_AX_RESIZE` | `ivps2x` | 硬解后的缩放:`ivps2x` IVPS 缩到 1008 宽再由 host 精确缩到 504;`ivps` 直接缩到 504;`host` 全分辨率下卡 |
 | `ABOT_AX_RANGE` | `tv` | 硬解颜色量程:IVPS 按全量程转 RGB,`tv` 在 host 把 16–235 展开到 0–255(手机/相机视频);`pc` 不处理 |
 | `ABOT_AX_FMT` | `bgr` | 传给 pyaxvideo `convert()` 的格式名;0.1.1 版 `bgr` 才得到 RGB 内存序 |
@@ -79,7 +81,8 @@ tmux new-session -d -s abot "bash start_service.sh > service_run.log 2>&1"   # �
 
 ```
 POST /jobs                file[, fps, ceiling_cut, ceiling_keep]  → {job_id, dedup, same_as}
-GET  /jobs                任务列表;运行中的带 progress {phase, frame, total, elapsed_s, sec_per_frame, eta_s};same_as = 用同一视频的其他任务
+POST /jobs/{id}/cancel    停止排队中/运行中的任务(下一帧中止,立即释放 NPU)
+GET  /jobs                任务列表;运行中的带 progress {phase: load|queued|extract|infer|post, frame, total, elapsed_s, sec_per_frame, eta_s};same_as = 用同一视频的其他任务
 GET  /jobs/{id}           任务状态、meta、产物
 GET  /jobs/{id}/{file}    下载产物(splats.ply / cloud.ply / floorplan.png / recon.npz / view_*.png)
 POST /jobs/{id}/view      载入 viser;POST /jobs/{id}/rerun 重跑;DELETE /jobs/{id} 删除
